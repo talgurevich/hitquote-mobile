@@ -4,6 +4,7 @@ import { createStackNavigator } from '@react-navigation/stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { View, Text, TouchableOpacity, StyleSheet, ActivityIndicator, Alert, Image, Linking, FlatList, RefreshControl, TextInput, ScrollView, ImageBackground, Dimensions, Platform, Modal, Share, Keyboard, TouchableWithoutFeedback } from 'react-native';
 import * as WebBrowser from 'expo-web-browser';
+import { WebView } from 'react-native-webview';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { supabase } from './lib/supabaseClient';
 import { validateSessionAndGetBusinessUserId } from './lib/businessUserUtils';
@@ -14,10 +15,12 @@ import Swipeable from 'react-native-gesture-handler/Swipeable';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import * as Print from 'expo-print';
 import { shareAsync } from 'expo-sharing';
+import * as ImagePicker from 'expo-image-picker';
 import ColorPalette from 'react-native-color-palette';
 import { isEmailApproved, isAdminEmail } from './lib/emailApproval';
 import { isDemoUser, getDemoData } from './lib/demoData';
 import { generatePDFTemplate, TEMPLATES } from './lib/pdfTemplates';
+import NewLoginScreen from './screens/NewLoginScreen';
 
 const Stack = createStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -551,10 +554,23 @@ function LoginScreen({ navigation, onLogin }) {
 function UnauthorizedScreen({ session, onLogout }) {
   const handleLogout = async () => {
     try {
-      await signOutGoogle();
+      const { setGuestMode } = require('./lib/localStorage');
+      const { signOut } = require('./lib/auth');
+
+      console.log('🚪 Unauthorized screen logout');
+
+      // Clear guest mode
+      await setGuestMode(false);
+
+      // Sign out
+      await signOut();
+
+      // Call parent logout handler
       if (onLogout) onLogout();
+
+      console.log('✅ Logout complete');
     } catch (error) {
-      console.error('Logout error:', error);
+      console.error('❌ Logout error:', error);
       Alert.alert('שגיאה', 'שגיאה בהתנתקות');
     }
   };
@@ -594,7 +610,8 @@ function DashboardScreen({ session, navigation: navProp }) {
     recentQuotes: [],
     topCustomers: [],
     topProducts: [],
-    loading: true
+    loading: true,
+    quotaInfo: null
   });
   const [refreshing, setRefreshing] = useState(false);
 
@@ -636,7 +653,13 @@ function DashboardScreen({ session, navigation: navProp }) {
           totalCustomers,
           totalProducts,
           recentQuotes: quotes.slice(0, 5),
-          topCustomers: customers.slice(0, 3) // Top 3 customers for demo
+          topCustomers: customers.slice(0, 3), // Top 3 customers for demo
+          quotaInfo: {
+            current_count: 0,
+            monthly_limit: -1,
+            remaining_quotes: -1,
+            tier_name: 'demo'
+          }
         });
         return;
       }
@@ -661,7 +684,7 @@ function DashboardScreen({ session, navigation: navProp }) {
       });
 
       // Fetch dashboard metrics in parallel
-      const [quotesData, customersData, monthlyQuotesData] = await Promise.all([
+      const [quotesData, customersData, monthlyQuotesData, quotaData] = await Promise.all([
         // Total quotes
         supabase
           .from('proposal')
@@ -681,7 +704,12 @@ function DashboardScreen({ session, navigation: navProp }) {
           .eq('business_id', businessUserId)
           .gte('created_at', monthStart.toISOString())
           .lte('created_at', monthEnd.toISOString())
-          .order('created_at', { ascending: false })
+          .order('created_at', { ascending: false }),
+
+        // Quota information
+        supabase.rpc('check_user_quota', {
+          p_auth_user_id: session.user.id
+        })
       ]);
 
       console.log('Quotes data:', {
@@ -736,7 +764,8 @@ function DashboardScreen({ session, navigation: navProp }) {
         recentQuotes,
         topCustomers,
         topProducts: [], // Will implement later
-        loading: false
+        loading: false,
+        quotaInfo: quotaData?.data?.[0] || null
       });
 
     } catch (error) {
@@ -834,6 +863,36 @@ function DashboardScreen({ session, navigation: navProp }) {
             <Text style={styles.metricLabel}>הצעות ממתינות</Text>
           </View>
         </View>
+
+        {/* Monthly Quota Counter */}
+        {dashboardData.quotaInfo && dashboardData.quotaInfo.monthly_limit > 0 && (
+          <View style={styles.quotaContainer}>
+            <View style={styles.quotaHeader}>
+              <Text style={styles.quotaTitle}>הצעות מחיר החודש</Text>
+              <Text style={styles.quotaTier}>{dashboardData.quotaInfo.tier_name}</Text>
+            </View>
+            <View style={styles.quotaProgress}>
+              <View style={styles.quotaProgressBar}>
+                <View
+                  style={[
+                    styles.quotaProgressFill,
+                    {
+                      width: `${Math.min((dashboardData.quotaInfo.current_count / dashboardData.quotaInfo.monthly_limit) * 100, 100)}%`,
+                      backgroundColor: dashboardData.quotaInfo.remaining_quotes < 5 ? '#ef4444' : '#3b82f6'
+                    }
+                  ]}
+                />
+              </View>
+              <Text style={styles.quotaText}>
+                {dashboardData.quotaInfo.current_count} / {dashboardData.quotaInfo.monthly_limit}
+                {' '}
+                <Text style={styles.quotaRemainingText}>
+                  ({dashboardData.quotaInfo.remaining_quotes} נותרו)
+                </Text>
+              </Text>
+            </View>
+          </View>
+        )}
 
         {/* Quick Actions */}
         <View style={styles.section}>
@@ -1317,11 +1376,18 @@ function SettingsScreen({ session }) {
   const [isEditing, setIsEditing] = useState(false);
   const [editedSettings, setEditedSettings] = useState({});
   const [saving, setSaving] = useState(false);
+  const [userProfile, setUserProfile] = useState(null);
+  const [accountTier, setAccountTier] = useState(null);
+  const [quotaInfo, setQuotaInfo] = useState(null);
+  const [previewTemplate, setPreviewTemplate] = useState(null);
 
   useEffect(() => {
     if (session?.user?.id) {
       loadBusinessUser();
       loadBusinessSettings();
+      loadUserProfile();
+      loadAccountTier();
+      loadQuotaInfo();
     }
   }, [session]);
 
@@ -1330,10 +1396,10 @@ function SettingsScreen({ session }) {
       const businessUserId = await validateSessionAndGetBusinessUserId(session);
 
       const { data: userData, error } = await supabase
-        .from('businesses')
+        .from('settings')
         .select('business_name as name, business_email as email')
-        .eq('id', businessUserId)
-        .single();
+        .eq('business_id', businessUserId)
+        .maybeSingle();
 
       if (!error && userData) {
         setBusinessUser(userData);
@@ -1359,15 +1425,26 @@ function SettingsScreen({ session }) {
       const businessUserId = await validateSessionAndGetBusinessUserId(session);
       if (!businessUserId) return;
 
+      // Load from settings table (same as web app)
       const { data: businessData, error } = await supabase
-        .from('businesses')
+        .from('settings')
         .select('business_name, business_email, business_phone, business_address, business_license, logo_url, header_color, pdf_template')
-        .eq('id', businessUserId)
+        .eq('business_id', businessUserId)
         .maybeSingle();
+
+      console.log('📊 Business settings loaded from settings table:', {
+        error,
+        hasData: !!businessData,
+        logo_url: businessData?.logo_url,
+        businessName: businessData?.business_name,
+        businessUserId
+      });
 
       if (!error && businessData) {
         setBusinessSettings(businessData);
         setEditedSettings(businessData);
+      } else if (error) {
+        console.error('Error loading settings:', error);
       }
     } catch (error) {
       console.error('Error loading business settings:', error);
@@ -1385,7 +1462,7 @@ function SettingsScreen({ session }) {
       }
 
       const { error } = await supabase
-        .from('businesses')
+        .from('settings')
         .update({
           business_name: editedSettings.business_name,
           business_email: editedSettings.business_email,
@@ -1396,12 +1473,21 @@ function SettingsScreen({ session }) {
           logo_url: editedSettings.logo_url,
           pdf_template: editedSettings.pdf_template,
         })
-        .eq('id', businessUserId);
+        .eq('business_id', businessUserId);
 
       if (error) throw error;
 
       setBusinessSettings(editedSettings);
       setIsEditing(false);
+
+      // Send Slack notification for profile completion
+      const { SlackUserActivity } = require('./lib/slackService');
+      SlackUserActivity.profileCompleted(
+        session.user.email,
+        editedSettings.business_name || 'לא צוין',
+        !!editedSettings.logo_url
+      );
+
       Alert.alert('הצלחה', 'הפרטים עודכנו בהצלחה');
     } catch (error) {
       console.error('Error saving settings:', error);
@@ -1416,11 +1502,261 @@ function SettingsScreen({ session }) {
     setIsEditing(false);
   };
 
+  const loadUserProfile = async () => {
+    try {
+      // Check if demo user
+      if (isDemoUser(session)) {
+        setUserProfile({
+          email: session.user.email,
+          display_name: 'Demo User',
+        });
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from('user_profiles')
+        .select('*')
+        .eq('supabase_auth_id', session.user.id)
+        .single();
+
+      if (!error && data) {
+        setUserProfile(data);
+      }
+    } catch (error) {
+      console.error('Error loading user profile:', error);
+    }
+  };
+
+  const loadAccountTier = async () => {
+    try {
+      // Check if demo user
+      if (isDemoUser(session)) {
+        setAccountTier({
+          tier: 'demo',
+          tier_name: 'demo',
+          monthly_quote_limit: -1,
+        });
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from('account_tiers')
+        .select('*')
+        .eq('auth_user_id', session.user.id)
+        .maybeSingle();
+
+      console.log('Account tier query result:', { data, error });
+
+      if (!error && data) {
+        // Map tier to tier_name for consistency
+        setAccountTier({
+          ...data,
+          tier_name: data.tier,
+        });
+      } else if (!data) {
+        // No tier found - user might not have a tier assigned yet
+        console.log('No account tier found for user - using default');
+        setAccountTier({
+          tier: 'free',
+          tier_name: 'free',
+          monthly_quote_limit: 10,
+        });
+      }
+    } catch (error) {
+      console.error('Error loading account tier:', error);
+    }
+  };
+
+  const loadQuotaInfo = async () => {
+    try {
+      // Check if demo user
+      if (isDemoUser(session)) {
+        setQuotaInfo({
+          current_count: 0,
+          monthly_limit: -1,
+          remaining_quotes: -1,
+        });
+        return;
+      }
+
+      const { data, error } = await supabase.rpc('check_user_quota', {
+        p_auth_user_id: session.user.id,
+      });
+
+      if (!error && data && data[0]) {
+        setQuotaInfo(data[0]);
+      }
+    } catch (error) {
+      console.error('Error loading quota info:', error);
+    }
+  };
+
+  const handleDeleteAccount = async () => {
+    Alert.alert(
+      'מחיקת חשבון',
+      'האם אתה בטוח שברצונך למחוק את החשבון? פעולה זו אינה ניתנת לביטול.',
+      [
+        { text: 'ביטול', style: 'cancel' },
+        {
+          text: 'מחק',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const { deleteAccount } = require('./lib/auth');
+              const result = await deleteAccount();
+
+              if (result.success) {
+                Alert.alert('הצלחה', 'החשבון נמחק בהצלחה');
+              } else {
+                Alert.alert('שגיאה', result.error?.message || 'שגיאה במחיקת החשבון');
+              }
+            } catch (error) {
+              console.error('Delete account error:', error);
+              Alert.alert('שגיאה', 'שגיאה במחיקת החשבון');
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const handlePreviewTemplate = (templateId) => {
+    // Generate sample quote data for preview
+    const sampleQuote = {
+      id: '12345',
+      proposal_number: 'DEMO-001',
+      created_at: new Date().toISOString(),
+      delivery_date: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+      valid_until: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+      status: 'pending',
+      subtotal: 4274,
+      vat_amount: 726,
+      total: 5000,
+      notes: 'זוהי הצעת מחיר לדוגמה',
+      payment_terms: '30 יום',
+      customer: {
+        name: 'לקוח לדוגמה',
+        email: 'customer@example.com',
+        phone: '050-1234567',
+        address: 'רחוב הדוגמה 1, תל אביב'
+      },
+      items: [
+        { custom_name: 'מוצר לדוגמה 1', qty: 2, unit_price: 1000, line_total: 2000 },
+        { custom_name: 'שירות לדוגמה 2', qty: 1, unit_price: 3000, line_total: 3000 }
+      ]
+    };
+
+    const sampleBusiness = {
+      business_name: businessSettings?.business_name || editedSettings?.business_name || 'שם העסק שלך',
+      business_email: businessSettings?.business_email || editedSettings?.business_email || 'info@business.com',
+      business_phone: businessSettings?.business_phone || editedSettings?.business_phone || '03-1234567',
+      business_address: businessSettings?.business_address || editedSettings?.business_address || 'כתובת העסק',
+      business_license: businessSettings?.business_license || editedSettings?.business_license || '123456789'
+    };
+
+    const html = generatePDFTemplate(
+      templateId,
+      sampleQuote,
+      sampleBusiness,
+      businessSettings?.logo_url || editedSettings?.logo_url || null,
+      businessSettings?.header_color || editedSettings?.header_color || '#FDDC33'
+    );
+
+    setPreviewTemplate({ id: templateId, html });
+  };
+
+  const handleUploadLogo = async () => {
+    try {
+      // Request permissions
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('שגיאה', 'נדרשת הרשאה לגישה לגלריה');
+        return;
+      }
+
+      // Launch image picker
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: true,
+        aspect: [1, 1],
+        quality: 0.8,
+      });
+
+      if (result.canceled) {
+        return;
+      }
+
+      const imageUri = result.assets[0].uri;
+
+      // Show loading
+      Alert.alert('מעלה', 'מעלה לוגו...');
+
+      // Convert image to base64
+      const response = await fetch(imageUri);
+      const blob = await response.blob();
+      const base64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+
+      // Upload to Supabase Storage
+      const fileExt = imageUri.split('.').pop();
+      const fileName = `${session.user.id}-${Date.now()}.${fileExt}`;
+      const filePath = `logos/${fileName}`;
+
+      // Convert base64 to blob for Supabase
+      const base64Data = base64.split(',')[1];
+      const binaryData = atob(base64Data);
+      const bytes = new Uint8Array(binaryData.length);
+      for (let i = 0; i < binaryData.length; i++) {
+        bytes[i] = binaryData.charCodeAt(i);
+      }
+      const uploadBlob = new Blob([bytes], { type: `image/${fileExt}` });
+
+      const { data: uploadData, error: uploadError } = await supabase.storage
+        .from('business-logos')
+        .upload(filePath, uploadBlob, {
+          contentType: `image/${fileExt}`,
+          upsert: false
+        });
+
+      if (uploadError) {
+        throw uploadError;
+      }
+
+      // Get public URL
+      const { data: { publicUrl } } = supabase.storage
+        .from('business-logos')
+        .getPublicUrl(filePath);
+
+      // Update settings with new logo URL
+      setEditedSettings({ ...editedSettings, logo_url: publicUrl });
+
+      Alert.alert('הצלחה', 'הלוגו הועלה בהצלחה!');
+    } catch (error) {
+      console.error('Logo upload error:', error);
+      Alert.alert('שגיאה', 'שגיאה בהעלאת הלוגו: ' + error.message);
+    }
+  };
 
   const handleLogout = async () => {
     try {
-      await signOutGoogle();
+      const { setGuestMode } = require('./lib/localStorage');
+      const { signOut } = require('./lib/auth');
+
+      console.log('🚪 Logging out...');
+
+      // Clear guest mode
+      await setGuestMode(false);
+
+      // Sign out from auth
+      await signOut();
+
+      console.log('✅ Logout complete');
     } catch (error) {
+      console.error('❌ Logout error:', error);
       Alert.alert('שגיאה', 'שגיאה בהתנתקות');
     }
   };
@@ -1464,36 +1800,42 @@ function SettingsScreen({ session }) {
       </SafeAreaView>
 
       <ScrollView style={styles.scrollContent} contentContainerStyle={styles.scrollContentContainer}>
-        {session?.user && (
-          <View style={styles.profileSection}>
-            <Text style={styles.sectionTitle}>פרופיל משתמש</Text>
-            <View style={styles.userInfo}>
-              <Text style={styles.userInfoText}>
-                חשבון: {session.user.email}
-              </Text>
-              {businessUser && (
-                <Text style={styles.userInfoText}>
-                  שם עסק: {businessUser.name}
-                </Text>
-              )}
-            </View>
-          </View>
-        )}
-
+        {/* Business Details Section */}
         <View style={styles.profileSection}>
           <Text style={styles.sectionTitle}>פרטי העסק</Text>
           {businessSettings ? (
             <View style={styles.businessDetailsContainer}>
-              {businessSettings.logo_url && (
+              {/* Business Logo */}
+              <View style={styles.logoSection}>
+                <Text style={styles.businessDetailLabel}>לוגו העסק:</Text>
                 <View style={styles.logoContainer}>
-                  <Text style={styles.businessDetailLabel}>לוגו:</Text>
-                  <Image
-                    source={{ uri: businessSettings.logo_url }}
-                    style={styles.businessLogo}
-                    resizeMode="contain"
-                  />
+                  {(editedSettings.logo_url || businessSettings.logo_url) ? (
+                    <View style={styles.logoDisplayContainer}>
+                      <Image
+                        source={{ uri: editedSettings.logo_url || businessSettings.logo_url }}
+                        style={styles.businessLogo}
+                        resizeMode="contain"
+                        onError={(e) => console.log('Logo load error:', e.nativeEvent.error)}
+                        onLoad={() => console.log('Logo loaded successfully:', editedSettings.logo_url || businessSettings.logo_url)}
+                      />
+                    </View>
+                  ) : (
+                    <View style={styles.logoPlaceholder}>
+                      <Text style={styles.logoPlaceholderText}>אין לוגו</Text>
+                    </View>
+                  )}
+                  {isEditing && (
+                    <TouchableOpacity
+                      style={styles.uploadLogoButton}
+                      onPress={handleUploadLogo}
+                    >
+                      <Text style={styles.uploadLogoButtonText}>
+                        {(editedSettings.logo_url || businessSettings.logo_url) ? '📷 שנה לוגו' : '📷 העלה לוגו'}
+                      </Text>
+                    </TouchableOpacity>
+                  )}
                 </View>
-              )}
+              </View>
 
               <View style={styles.businessDetailRow}>
                 <Text style={styles.businessDetailLabel}>שם העסק:</Text>
@@ -1598,8 +1940,8 @@ function SettingsScreen({ session }) {
               <View style={styles.businessDetailRow}>
                 <Text style={styles.businessDetailLabel}>תבנית PDF:</Text>
                 {isEditing ? (
-                  <View style={styles.templateSelectorContainer}>
-                    <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.templateScrollView}>
+                  <View style={styles.templateSelectionContainer}>
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false}>
                       {Object.values(TEMPLATES).map((template) => (
                         <TouchableOpacity
                           key={template.id}
@@ -1610,21 +1952,26 @@ function SettingsScreen({ session }) {
                           onPress={() => setEditedSettings({...editedSettings, pdf_template: template.id})}
                         >
                           <Text style={[
-                            styles.templateOptionText,
-                            editedSettings.pdf_template === template.id && styles.templateOptionTextSelected
+                            styles.templateOptionName,
+                            editedSettings.pdf_template === template.id && styles.templateOptionNameSelected
                           ]}>
                             {template.name}
                           </Text>
-                          <Text style={styles.templateOptionDescription}>
-                            {template.description}
-                          </Text>
+                          <Text style={styles.templateOptionDesc}>{template.description}</Text>
+
+                          <TouchableOpacity
+                            style={styles.previewButtonSmall}
+                            onPress={() => handlePreviewTemplate(template.id)}
+                          >
+                            <Text style={styles.previewButtonSmallText}>👁 תצוגה</Text>
+                          </TouchableOpacity>
                         </TouchableOpacity>
                       ))}
                     </ScrollView>
                   </View>
                 ) : (
                   <Text style={styles.businessDetailValue}>
-                    {TEMPLATES[businessSettings.pdf_template || 'template1']?.name || 'קלאסי (נוכחי)'}
+                    {TEMPLATES[businessSettings.pdf_template || 'template1']?.name || 'קלאסי'}
                   </Text>
                 )}
               </View>
@@ -1646,6 +1993,63 @@ function SettingsScreen({ session }) {
             </View>
           )}
         </View>
+
+        {/* Profile Section */}
+        {session?.user && (
+          <View style={styles.profileSection}>
+            <Text style={styles.sectionTitle}>פרופיל משתמש</Text>
+            <View style={styles.profileCard}>
+              <View style={styles.profileRow}>
+                <Text style={styles.profileLabel}>אימייל:</Text>
+                <Text style={styles.profileValue}>{session.user.email}</Text>
+              </View>
+
+              {userProfile?.display_name && (
+                <View style={styles.profileRow}>
+                  <Text style={styles.profileLabel}>שם:</Text>
+                  <Text style={styles.profileValue}>{userProfile.display_name}</Text>
+                </View>
+              )}
+
+              {accountTier && (
+                <View style={styles.profileRow}>
+                  <Text style={styles.profileLabel}>רמת חשבון:</Text>
+                  <View style={styles.tierBadge}>
+                    <Text style={styles.tierBadgeText}>
+                      {accountTier.tier_name === 'free' ? 'חינם' :
+                       accountTier.tier_name === 'pro' ? 'מקצועי' :
+                       accountTier.tier_name === 'business' ? 'עסקי' :
+                       accountTier.tier_name === 'demo' ? 'דמו' :
+                       accountTier.tier_name}
+                    </Text>
+                  </View>
+                </View>
+              )}
+
+              {quotaInfo && quotaInfo.monthly_limit > 0 && (
+                <View style={styles.profileRow}>
+                  <Text style={styles.profileLabel}>הצעות מחיר החודש:</Text>
+                  <Text style={styles.profileValue}>
+                    {quotaInfo.current_count} / {quotaInfo.monthly_limit}
+                    {' '}
+                    <Text style={styles.quotaRemainingSmall}>
+                      ({quotaInfo.remaining_quotes} נותרו)
+                    </Text>
+                  </Text>
+                </View>
+              )}
+
+              {!isDemoUser(session) && (
+                <TouchableOpacity
+                  style={styles.deleteAccountButton}
+                  onPress={handleDeleteAccount}
+                >
+                  <Text style={styles.deleteAccountText}>מחק חשבון</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          </View>
+        )}
       </ScrollView>
 
       <View style={styles.versionContainer}>
@@ -1659,6 +2063,50 @@ function SettingsScreen({ session }) {
       >
         <Text style={[styles.settingText, styles.logoutText]}>התנתק</Text>
       </TouchableOpacity>
+
+      {/* Template Preview Modal */}
+      {previewTemplate && (
+        <Modal
+          visible={true}
+          animationType="slide"
+          onRequestClose={() => setPreviewTemplate(null)}
+        >
+          <SafeAreaView style={{ flex: 1, backgroundColor: '#fff' }}>
+            <View style={{
+              flexDirection: 'row-reverse',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              padding: 15,
+              borderBottomWidth: 1,
+              borderBottomColor: '#eee',
+              backgroundColor: '#fff'
+            }}>
+              <Text style={{
+                fontSize: 18,
+                fontWeight: 'bold',
+                textAlign: 'right',
+                flex: 1
+              }}>
+                תצוגה מקדימה: {TEMPLATES[previewTemplate.id]?.name}
+              </Text>
+              <TouchableOpacity
+                onPress={() => setPreviewTemplate(null)}
+                style={{
+                  padding: 8,
+                  marginLeft: 10
+                }}
+              >
+                <Text style={{ fontSize: 24, color: '#666' }}>✕</Text>
+              </TouchableOpacity>
+            </View>
+            <WebView
+              source={{ html: previewTemplate.html }}
+              style={{ flex: 1 }}
+              originWhitelist={['*']}
+            />
+          </SafeAreaView>
+        </Modal>
+      )}
     </View>
   );
 }
@@ -2628,6 +3076,16 @@ function CreateQuoteScreen({ navigation, session, route }) {
 
       console.log('✅ Quote created successfully! Quote ID:', quoteData.id);
       console.log('✅ Quote data:', quoteData);
+
+      // Send Slack notification for quote creation
+      const { SlackQuoteActivity } = require('./lib/slackService');
+      SlackQuoteActivity.quoteCreated(
+        session.user.email,
+        proposalNumber,
+        customerData.name,
+        safeTotal
+      );
+
       Alert.alert('הצלחה', 'הצעת המחיר נוצרה בהצלחה!');
       navigation.goBack();
 
@@ -3337,11 +3795,11 @@ function ViewQuoteScreen({ navigation, route, session }) {
         return;
       }
 
-      // Load settings with the business user ID
+      // Load settings with the business user ID (from settings table)
       const { data: businessData, error } = await supabase
-        .from('businesses')
+        .from('settings')
         .select('business_name, business_email, business_phone, business_address, business_license, logo_url, header_color, pdf_template')
-        .eq('id', businessUserId)
+        .eq('business_id', businessUserId)
         .maybeSingle();
 
       if (error) {
@@ -3516,11 +3974,11 @@ function ViewQuoteScreen({ navigation, route, session }) {
         return;
       }
 
-      // Load business settings for the current user only
+      // Load business settings for the current user only (from settings table)
       const { data: businessData, error: businessError } = await supabase
-        .from('businesses')
+        .from('settings')
         .select('business_name, business_email, business_phone, business_address, business_license, logo_url, header_color, pdf_template')
-        .eq('id', businessUserId)
+        .eq('business_id', businessUserId)
         .maybeSingle();
 
       if (businessError) {
@@ -3530,9 +3988,9 @@ function ViewQuoteScreen({ navigation, route, session }) {
       // If no business data found, create a basic settings record for the current user
       if (!businessData) {
         const { data: newSettingsData, error: createError } = await supabase
-          .from('businesses')
+          .from('settings')
           .insert({
-            owner_id: businessUserId,
+            business_id: businessUserId,
             business_name: 'שם העסק',
             business_email: '',
             business_phone: '',
@@ -3642,7 +4100,11 @@ function ViewQuoteScreen({ navigation, route, session }) {
         discount_value: discountValue,
         customer: quote.customer,
         items: quoteItems,
-        valid_until: quote.valid_until
+        valid_until: quote.valid_until,
+        // Add calculated totals for PDF
+        subtotal: netAfterDiscount,
+        vat_amount: vatAmount,
+        total: total
       };
 
       // Generate HTML using the selected template
@@ -5441,7 +5903,7 @@ function CustomersScreen({ session, navigation: navProp, route }) {
               style={styles.saveButtonTouchable}
               onPress={handleAddCustomer}
             >
-              <Text style={styles.saveButton}>שמור</Text>
+              <Text style={styles.saveButtonText}>שמור</Text>
             </TouchableOpacity>
           </View>
           <ScrollView style={styles.modalContent}>
@@ -5505,7 +5967,7 @@ function CustomersScreen({ session, navigation: navProp, route }) {
               style={styles.saveButtonTouchable}
               onPress={handleEditCustomer}
             >
-              <Text style={styles.saveButton}>שמור</Text>
+              <Text style={styles.saveButtonText}>שמור</Text>
             </TouchableOpacity>
           </View>
           <ScrollView style={styles.modalContent}>
@@ -5619,6 +6081,7 @@ export default function App() {
   const [session, setSession] = useState(null);
   const [isApprovalChecking, setIsApprovalChecking] = useState(false);
   const [isApproved, setIsApproved] = useState(false);
+  const [isGuestSession, setIsGuestSession] = useState(false);
 
   const checkApprovalStatus = async (email) => {
     console.log('🔍 === APP.JS AUTHORIZATION CHECK STARTING ===');
@@ -5670,14 +6133,54 @@ export default function App() {
     setSession(mockSession);
   };
 
-  const handleLogout = () => {
-    setSession(null);
-    setIsApproved(false);
+  const handleLogout = async () => {
+    try {
+      const { setGuestMode } = require('./lib/localStorage');
+      console.log('🚪 Main App handleLogout called');
+
+      // Clear guest mode
+      await setGuestMode(false);
+
+      // Clear session state
+      setSession(null);
+      setIsApproved(false);
+      setIsGuestSession(false);
+
+      console.log('✅ Logout complete - should return to login screen');
+    } catch (error) {
+      console.error('❌ Logout error:', error);
+    }
   };
 
   useEffect(() => {
+    // Import guest mode check
+    const { isGuestMode } = require('./lib/localStorage');
+
     // Check for existing session
-    supabase.auth.getSession().then(async ({ data: { session } }) => {
+    const initAuth = async () => {
+      // First check if in guest mode
+      const guestStatus = await isGuestMode();
+
+      if (guestStatus) {
+        console.log('🎭 Guest mode detected - creating demo session');
+        const demoSession = {
+          user: {
+            id: 'demo-user-apple-review',
+            email: 'applereview@demo.com',
+            user_metadata: {
+              provider: 'demo'
+            }
+          }
+        };
+        setSession(demoSession);
+        setIsApproved(true); // Auto-approve demo user
+        setIsGuestSession(true);
+        setInitializing(false);
+        return;
+      }
+
+      // Otherwise check for real session
+      const { data: { session } } = await supabase.auth.getSession();
       if (session) {
         setIsApprovalChecking(true);
         const approved = await checkApprovalStatus(session.user.email);
@@ -5685,12 +6188,55 @@ export default function App() {
         setIsApprovalChecking(false);
       }
       setSession(session);
+      setIsGuestSession(false);
       setInitializing(false);
-    });
+    };
+
+    initAuth();
+
+    // Check guest mode periodically using a ref to track if we should create session
+    let hasCreatedGuestSession = false;
+
+    const guestCheckInterval = setInterval(async () => {
+      const guestStatus = await isGuestMode();
+
+      // Only create guest session once when guest mode is enabled
+      if (guestStatus && !hasCreatedGuestSession) {
+        console.log('🎭 Guest mode activated - creating demo session');
+        hasCreatedGuestSession = true;
+        const demoSession = {
+          user: {
+            id: 'demo-user-apple-review',
+            email: 'applereview@demo.com',
+            user_metadata: {
+              provider: 'demo'
+            }
+          }
+        };
+        setSession(demoSession);
+        setIsApproved(true);
+        setIsGuestSession(true);
+      } else if (!guestStatus && hasCreatedGuestSession) {
+        // Guest mode was turned off, clear the session
+        console.log('👋 Guest mode deactivated - clearing session');
+        hasCreatedGuestSession = false;
+        setSession(null);
+        setIsApproved(false);
+        setIsGuestSession(false);
+      }
+    }, 500);
 
     // Listen for auth changes
     const { data: authListener } = supabase.auth.onAuthStateChange(async (_event, session) => {
       console.log('Auth state changed:', _event, session?.user?.email);
+
+      // Don't override demo session
+      const guestStatus = await isGuestMode();
+      if (guestStatus) {
+        console.log('🎭 In guest mode - ignoring auth state change');
+        return;
+      }
+
       if (session) {
         setIsApprovalChecking(true);
         const approved = await checkApprovalStatus(session.user.email);
@@ -5700,10 +6246,12 @@ export default function App() {
         setIsApproved(false);
       }
       setSession(session);
+      setIsGuestSession(false);
     });
 
     return () => {
       authListener.subscription.unsubscribe();
+      clearInterval(guestCheckInterval);
     };
   }, []);
 
@@ -5786,7 +6334,7 @@ export default function App() {
             )
           ) : (
             <Stack.Screen name="Login">
-              {(props) => <LoginScreen {...props} onLogin={handleManualLogin} />}
+              {(props) => <NewLoginScreen {...props} onLogin={handleManualLogin} />}
             </Stack.Screen>
           )}
         </Stack.Navigator>
@@ -6391,6 +6939,71 @@ const styles = StyleSheet.create({
   },
   profileSection: {
     marginVertical: 10,
+  },
+  profileCard: {
+    backgroundColor: '#fff',
+    marginHorizontal: 15,
+    padding: 20,
+    borderRadius: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  profileRow: {
+    flexDirection: 'row-reverse',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f3f4f6',
+  },
+  profileLabel: {
+    fontSize: 14,
+    color: '#6b7280',
+    fontWeight: '500',
+    textAlign: 'right',
+  },
+  profileValue: {
+    fontSize: 14,
+    color: '#1f2937',
+    fontWeight: '600',
+    textAlign: 'right',
+    flex: 1,
+    marginRight: 10,
+  },
+  tierBadge: {
+    backgroundColor: '#dbeafe',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 12,
+  },
+  tierBadgeText: {
+    fontSize: 13,
+    color: '#1e40af',
+    fontWeight: '700',
+    textTransform: 'uppercase',
+  },
+  quotaRemainingSmall: {
+    fontSize: 12,
+    color: '#6b7280',
+    fontWeight: '400',
+  },
+  deleteAccountButton: {
+    backgroundColor: '#fee2e2',
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 8,
+    marginTop: 15,
+    borderWidth: 1,
+    borderColor: '#fecaca',
+  },
+  deleteAccountText: {
+    color: '#dc2626',
+    fontSize: 14,
+    fontWeight: '600',
+    textAlign: 'center',
   },
   sectionTitle: {
     fontSize: 16,
@@ -7838,10 +8451,63 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#e0e0e0',
   },
+  logoSection: {
+    marginBottom: 20,
+    alignItems: 'center',
+  },
+  logoContainer: {
+    width: '100%',
+    alignItems: 'center',
+  },
+  logoDisplayContainer: {
+    width: '100%',
+    alignItems: 'center',
+    padding: 15,
+    backgroundColor: 'transparent',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    marginTop: 10,
+  },
   businessLogo: {
-    width: 120,
-    height: 80,
-    marginTop: 8,
+    width: 150,
+    height: 150,
+    backgroundColor: 'transparent',
+  },
+  logoPlaceholder: {
+    width: '100%',
+    height: 150,
+    backgroundColor: '#f3f4f6',
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: '#e5e7eb',
+    borderStyle: 'dashed',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginTop: 10,
+  },
+  logoPlaceholderText: {
+    color: '#9ca3af',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  uploadLogoButton: {
+    backgroundColor: '#FDDC33',
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 10,
+    marginTop: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  uploadLogoButtonText: {
+    fontSize: 14,
+    fontWeight: 'bold',
+    color: '#000',
+    textAlign: 'center',
   },
   businessDetailRow: {
     flexDirection: 'row-reverse',
@@ -7861,6 +8527,7 @@ const styles = StyleSheet.create({
     color: '#333',
     minWidth: 80,
     textAlign: 'right',
+    paddingRight: 15,
   },
   businessDetailValue: {
     fontSize: 14,
@@ -8108,7 +8775,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingHorizontal: 15,
     paddingBottom: 20,
-    paddingTop: 25,
+    paddingTop: 60,
     backgroundColor: '#fff',
     borderBottomWidth: 1,
     borderBottomColor: '#e0e0e0',
@@ -8129,10 +8796,22 @@ const styles = StyleSheet.create({
     color: '#666',
   },
   saveButtonTouchable: {
-    width: 44,
-    height: 44,
+    backgroundColor: '#3b82f6',
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 8,
     justifyContent: 'center',
     alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 3,
+    elevation: 2,
+  },
+  saveButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
   },
   textArea: {
     height: 80,
@@ -8290,17 +8969,80 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     fontWeight: '500',
   },
+  quotaContainer: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 20,
+    marginHorizontal: 15,
+    marginBottom: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  quotaHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 15,
+  },
+  quotaTitle: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#1f2937',
+  },
+  quotaTier: {
+    fontSize: 12,
+    color: '#6b7280',
+    backgroundColor: '#f3f4f6',
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    borderRadius: 12,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+  },
+  quotaProgress: {
+    gap: 10,
+  },
+  quotaProgressBar: {
+    height: 8,
+    backgroundColor: '#e5e7eb',
+    borderRadius: 4,
+    overflow: 'hidden',
+  },
+  quotaProgressFill: {
+    height: '100%',
+    borderRadius: 4,
+  },
+  quotaText: {
+    fontSize: 14,
+    color: '#374151',
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+  quotaRemainingText: {
+    color: '#6b7280',
+    fontWeight: '400',
+  },
   section: {
     marginHorizontal: 15,
     marginBottom: 25,
   },
   sectionTitle: {
-    fontSize: 18,
+    fontSize: 20,
     fontWeight: 'bold',
     color: '#1f2937',
     marginBottom: 15,
+    marginTop: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    backgroundColor: '#f8f9fa',
+    borderRadius: 8,
     textAlign: 'right',
     writingDirection: 'rtl',
+    borderRightWidth: 4,
+    borderRightColor: '#FDDC33',
   },
   quickActionsContainer: {
     flexDirection: 'row',
@@ -8420,43 +9162,54 @@ const styles = StyleSheet.create({
   },
 
   // Template selector styles
-  templateSelectorContainer: {
+  templateSelectionContainer: {
     flex: 1,
-    marginTop: 10,
-  },
-  templateScrollView: {
-    flex: 1,
+    marginLeft: 10,
   },
   templateOption: {
-    marginRight: 12,
-    padding: 12,
-    backgroundColor: '#f3f4f6',
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#e5e7eb',
     minWidth: 140,
+    marginRight: 10,
+    backgroundColor: '#fff',
+    borderRadius: 8,
+    borderWidth: 1.5,
+    borderColor: '#e0e0e0',
+    padding: 12,
     alignItems: 'center',
   },
   templateOptionSelected: {
-    backgroundColor: '#dbeafe',
-    borderColor: '#3b82f6',
+    borderColor: '#FDDC33',
     borderWidth: 2,
+    backgroundColor: '#fffef0',
   },
-  templateOptionText: {
-    fontSize: 12,
+  templateOptionName: {
+    fontSize: 15,
     fontWeight: 'bold',
-    color: '#374151',
+    color: '#333',
     textAlign: 'center',
     marginBottom: 4,
   },
-  templateOptionTextSelected: {
-    color: '#1d4ed8',
+  templateOptionNameSelected: {
+    color: '#d4a900',
   },
-  templateOptionDescription: {
-    fontSize: 10,
-    color: '#6b7280',
+  templateOptionDesc: {
+    fontSize: 11,
+    color: '#666',
     textAlign: 'center',
-    lineHeight: 12,
+    marginBottom: 8,
+    lineHeight: 14,
+  },
+  previewButtonSmall: {
+    backgroundColor: '#f5f5f5',
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#ddd',
+  },
+  previewButtonSmallText: {
+    fontSize: 11,
+    color: '#555',
+    fontWeight: '600',
   },
   pdfPreviewContainer: {
     flex: 1,

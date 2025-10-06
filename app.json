@@ -3,7 +3,7 @@
     "name": "hitquote-mobile",
     "slug": "hitquote-mobile",
     "owner": "hitquote",
-    "version": "1.1.3",
+    "version": "1.2.6",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -22,6 +22,18 @@
       "bundleIdentifier": "com.hitquote.mobile",
       "infoPlist": {
         "CFBundleURLTypes": [
+          {
+            "CFBundleURLName": "googleusercontent",
+            "CFBundleURLSchemes": [
+              "com.googleusercontent.apps.138147681546-ihacri3mbqbe9prcm2461lbnu3j993il"
+            ]
+          },
+          {
+            "CFBundleURLName": "googleusercontent",
+            "CFBundleURLSchemes": [
+              "com.googleusercontent.apps.138147681546-ihacri3mbqbe9prcm2461lbnu3j993il"
+            ]
+          },
           {
             "CFBundleURLName": "googleusercontent",
             "CFBundleURLSchemes": [
@@ -63,6 +75,12 @@
       "eas": {
         "projectId": "68083331-fa42-49a7-b7ec-610751bb5868"
       }
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/68083331-fa42-49a7-b7ec-610751bb5868"
     }
   }
 }
