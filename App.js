@@ -355,6 +355,85 @@ const IconPDF = ({ size = 20, color = '#fff' }) => (
   </View>
 );
 
+const IconPhone = ({ size = 20, color = '#666' }) => (
+  <View style={{ width: size, height: size, justifyContent: 'center', alignItems: 'center' }}>
+    <View style={{
+      width: size * 0.65,
+      height: size * 0.8,
+      borderWidth: 1.5,
+      borderColor: color,
+      borderRadius: size * 0.15,
+      transform: [{ rotate: '-10deg' }]
+    }}>
+      <View style={{
+        position: 'absolute',
+        bottom: size * 0.15,
+        left: size * 0.1,
+        width: size * 0.45,
+        height: size * 0.08,
+        backgroundColor: color,
+        borderRadius: size * 0.04
+      }} />
+    </View>
+  </View>
+);
+
+const IconMessage = ({ size = 20, color = '#666' }) => (
+  <View style={{ width: size, height: size, justifyContent: 'center', alignItems: 'center' }}>
+    <View style={{
+      width: size * 0.8,
+      height: size * 0.65,
+      borderWidth: 1.5,
+      borderColor: color,
+      borderRadius: size * 0.12,
+      justifyContent: 'center',
+      alignItems: 'center'
+    }}>
+      <View style={{ width: size * 0.5, height: 1, backgroundColor: color, marginBottom: 2 }} />
+      <View style={{ width: size * 0.4, height: 1, backgroundColor: color }} />
+    </View>
+    <View style={{
+      position: 'absolute',
+      bottom: size * 0.12,
+      left: size * 0.15,
+      width: 0,
+      height: 0,
+      borderLeftWidth: size * 0.12,
+      borderLeftColor: 'transparent',
+      borderRightWidth: size * 0.12,
+      borderRightColor: 'transparent',
+      borderTopWidth: size * 0.12,
+      borderTopColor: color,
+    }} />
+  </View>
+);
+
+const IconEmail = ({ size = 20, color = '#666' }) => (
+  <View style={{ width: size, height: size, justifyContent: 'center', alignItems: 'center' }}>
+    <View style={{
+      width: size * 0.8,
+      height: size * 0.6,
+      borderWidth: 1.5,
+      borderColor: color,
+      borderRadius: 2
+    }}>
+      <View style={{
+        position: 'absolute',
+        top: -1,
+        left: -1,
+        width: 0,
+        height: 0,
+        borderLeftWidth: size * 0.4,
+        borderLeftColor: 'transparent',
+        borderRightWidth: size * 0.4,
+        borderRightColor: 'transparent',
+        borderTopWidth: size * 0.3,
+        borderTopColor: color,
+      }} />
+    </View>
+  </View>
+);
+
 // Utility function to parse product options
 const parseOptions = (optStr) => {
   if (!optStr) return [];
@@ -1371,6 +1450,9 @@ function QuotesScreen({ session, navigation: navProp }) {
 
 // Settings Screen
 function SettingsScreen({ session }) {
+  // ORIGINAL STATE (for rollback):
+  // Just scroll view with both sections visible
+  const [activeTab, setActiveTab] = useState('business'); // 'business' or 'profile'
   const [businessUser, setBusinessUser] = useState(null);
   const [businessSettings, setBusinessSettings] = useState(null);
   const [isEditing, setIsEditing] = useState(false);
@@ -1799,10 +1881,27 @@ function SettingsScreen({ session }) {
         </View>
       </SafeAreaView>
 
+      {/* Tab Buttons */}
+      <View style={styles.tabsContainer}>
+        <TouchableOpacity
+          style={[styles.tab, activeTab === 'business' && styles.tabActive]}
+          onPress={() => setActiveTab('business')}
+        >
+          <Text style={[styles.tabText, activeTab === 'business' && styles.tabTextActive]}>פרטי העסק</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.tab, activeTab === 'profile' && styles.tabActive]}
+          onPress={() => setActiveTab('profile')}
+        >
+          <Text style={[styles.tabText, activeTab === 'profile' && styles.tabTextActive]}>פרופיל משתמש</Text>
+        </TouchableOpacity>
+      </View>
+
       <ScrollView style={styles.scrollContent} contentContainerStyle={styles.scrollContentContainer}>
-        {/* Business Details Section */}
-        <View style={styles.profileSection}>
-          <Text style={styles.sectionTitle}>פרטי העסק</Text>
+        {/* Business Details Tab */}
+        {activeTab === 'business' && (
+          <View style={styles.profileSection}>
+            <Text style={styles.sectionTitle}>פרטי העסק</Text>
           {businessSettings ? (
             <View style={styles.businessDetailsContainer}>
               {/* Business Logo */}
@@ -1992,10 +2091,11 @@ function SettingsScreen({ session }) {
               </Text>
             </View>
           )}
-        </View>
+          </View>
+        )}
 
-        {/* Profile Section */}
-        {session?.user && (
+        {/* Profile Tab */}
+        {activeTab === 'profile' && session?.user && (
           <View style={styles.profileSection}>
             <Text style={styles.sectionTitle}>פרופיל משתמש</Text>
             <View style={styles.profileCard}>
@@ -2071,12 +2171,14 @@ function SettingsScreen({ session }) {
           animationType="slide"
           onRequestClose={() => setPreviewTemplate(null)}
         >
-          <SafeAreaView style={{ flex: 1, backgroundColor: '#fff' }}>
+          <View style={{ flex: 1, backgroundColor: '#fff', paddingTop: Platform.OS === 'ios' ? 50 : 20 }}>
             <View style={{
               flexDirection: 'row-reverse',
               alignItems: 'center',
               justifyContent: 'space-between',
-              padding: 15,
+              paddingHorizontal: 15,
+              paddingTop: 15,
+              paddingBottom: 15,
               borderBottomWidth: 1,
               borderBottomColor: '#eee',
               backgroundColor: '#fff'
@@ -2092,8 +2194,12 @@ function SettingsScreen({ session }) {
               <TouchableOpacity
                 onPress={() => setPreviewTemplate(null)}
                 style={{
-                  padding: 8,
-                  marginLeft: 10
+                  padding: 12,
+                  marginLeft: 10,
+                  minWidth: 44,
+                  minHeight: 44,
+                  justifyContent: 'center',
+                  alignItems: 'center'
                 }}
               >
                 <Text style={{ fontSize: 24, color: '#666' }}>✕</Text>
@@ -2104,7 +2210,7 @@ function SettingsScreen({ session }) {
               style={{ flex: 1 }}
               originWhitelist={['*']}
             />
-          </SafeAreaView>
+          </View>
         </Modal>
       )}
     </View>
@@ -3014,42 +3120,118 @@ function CreateQuoteScreen({ navigation, session, route }) {
         throw quoteError;
       }
 
-      // Add quote items with safe numerical values
-      const items = selectedProducts.map(item => {
+      // Ensure all products exist in the database before creating quote items
+      console.log('🔍 Checking if products exist in database...');
+      const productIds = await Promise.all(selectedProducts.map(async (item) => {
+        // If product has no ID or invalid ID, create it in the database
+        if (!item.id || item.id.toString().length >= 50) {
+          console.log('⚠️ Product has no valid ID, creating in database:', item.name);
+          const { data: newProduct, error: createError } = await supabase
+            .from('product')
+            .insert({
+              business_id: businessUserId,
+              category: item.category || 'כללי',
+              name: item.name,
+              unit_label: item.unit_label || 'יחידה',
+              base_price: item.base_price || 0,
+              notes: item.notes || '',
+              options: item.options || []
+            })
+            .select('id')
+            .single();
+
+          if (createError) {
+            console.error('❌ Failed to create product:', createError);
+            throw createError;
+          }
+
+          console.log('✅ Created product with ID:', newProduct.id);
+          return { originalItem: item, productId: newProduct.id };
+        }
+
+        // Check if product exists in database
+        const { data: existingProduct, error: checkError } = await supabase
+          .from('product')
+          .select('id')
+          .eq('id', item.id)
+          .eq('business_id', businessUserId)
+          .maybeSingle();
+
+        if (checkError) {
+          console.error('❌ Error checking product:', checkError);
+          throw checkError;
+        }
+
+        if (!existingProduct) {
+          // Product doesn't exist, create it
+          console.log('⚠️ Product ID not found in database, creating:', item.id, item.name);
+          const { data: newProduct, error: createError } = await supabase
+            .from('product')
+            .insert({
+              business_id: businessUserId,
+              category: item.category || 'כללי',
+              name: item.name,
+              unit_label: item.unit_label || 'יחידה',
+              base_price: item.base_price || 0,
+              notes: item.notes || '',
+              options: item.options || []
+            })
+            .select('id')
+            .single();
+
+          if (createError) {
+            console.error('❌ Failed to create product:', createError);
+            throw createError;
+          }
+
+          console.log('✅ Created product with new ID:', newProduct.id);
+          return { originalItem: item, productId: newProduct.id };
+        }
+
+        console.log('✅ Product exists:', existingProduct.id);
+        return { originalItem: item, productId: existingProduct.id };
+      }));
+
+      // Add quote items with safe numerical values and verified product IDs
+      const items = productIds.map(({ originalItem: item, productId }) => {
         const optionsText = item.optionsText || '';
+        const itemNotes = item.notes || '';
         const safeUnitPrice = Math.min(Math.max(0, Math.floor(item.base_price || 0)), 2147483647);
         const safeQuantity = Math.min(Math.max(1, Math.floor(item.quantity || 1)), 10000);
         const safeLineTotal = Math.min(safeUnitPrice * safeQuantity, 2147483647);
 
+        // Combine item notes with options text
+        let combinedNotes = '';
+        if (itemNotes && optionsText) {
+          combinedNotes = `${itemNotes}\nאפשרויות: ${optionsText}`;
+        } else if (itemNotes) {
+          combinedNotes = itemNotes;
+        } else if (optionsText) {
+          combinedNotes = `אפשרויות: ${optionsText}`;
+        }
+
         console.log('Item debug:', {
           name: item.name,
+          productId,
           originalPrice: item.base_price,
           safeUnitPrice,
           originalQuantity: item.quantity,
           safeQuantity,
-          safeLineTotal
-        });
-
-        // Ensure product_id is safe - if it's a problematic value, set to null
-        const safeProductId = (item.id && item.id.toString().length < 50) ? item.id : null;
-
-        console.log('Processing item:', {
-          itemId: item.id,
-          itemIdType: typeof item.id,
-          itemIdLength: item.id?.toString().length,
-          safeProductId,
-          name: item.name
+          safeLineTotal,
+          itemNotes,
+          optionsText,
+          combinedNotes
         });
 
         return {
           proposal_id: quoteData.id,
-          product_id: safeProductId,
+          product_id: productId,
           product_name: item.name,
-          custom_name: item.name, // Add this field as well
+          custom_name: item.name,
           qty: safeQuantity,
           unit_price: safeUnitPrice,
           line_total: safeLineTotal,
-          notes: optionsText ? `אפשרויות: ${optionsText}` : ''
+          notes: combinedNotes
         };
       });
 
@@ -4299,6 +4481,11 @@ function ViewQuoteScreen({ navigation, route, session }) {
                 <Text style={styles.quoteItemDetails}>
                   כמות: {item.qty}
                 </Text>
+                {item.notes && item.notes.trim() !== '' && (
+                  <Text style={styles.quoteItemNotes}>
+                    {item.notes}
+                  </Text>
+                )}
               </View>
             </View>
           ))}
@@ -4363,6 +4550,14 @@ function ViewQuoteScreen({ navigation, route, session }) {
                 תאריך חתימה: {new Date(quote.signature_timestamp).toLocaleDateString('he-IL')}
               </Text>
             )}
+          </View>
+        )}
+
+        {/* General Quote Notes */}
+        {quote.notes && quote.notes.trim() !== '' && (
+          <View style={styles.quoteSection}>
+            <Text style={styles.quoteSectionTitle}>הערות</Text>
+            <Text style={styles.quoteNotesText}>{quote.notes}</Text>
           </View>
         )}
       </ScrollView>
@@ -5692,7 +5887,7 @@ function CustomersScreen({ session, navigation: navProp, route }) {
               handleCall(item.phone);
             }}
           >
-            <Text style={styles.actionIcon}>📞</Text>
+            <IconPhone size={20} color="#3b82f6" />
           </TouchableOpacity>
           <TouchableOpacity
             style={styles.actionButton}
@@ -5701,7 +5896,7 @@ function CustomersScreen({ session, navigation: navProp, route }) {
               handleWhatsApp(item.phone);
             }}
           >
-            <Text style={styles.actionIcon}>💬</Text>
+            <IconMessage size={20} color="#25D366" />
           </TouchableOpacity>
           <TouchableOpacity
             style={styles.actionButton}
@@ -5710,7 +5905,7 @@ function CustomersScreen({ session, navigation: navProp, route }) {
               handleEmail(item.email);
             }}
           >
-            <Text style={styles.actionIcon}>✉️</Text>
+            <IconEmail size={20} color="#6b7280" />
           </TouchableOpacity>
         </View>
       </TouchableOpacity>
@@ -6290,12 +6485,22 @@ export default function App() {
               </Stack.Screen>
               <Stack.Screen
                 name="ViewQuote"
-                options={{
+                options={({ navigation, route }) => ({
                   presentation: 'modal',
                   headerShown: true,
                   title: 'צפייה בהצעת מחיר',
-                  headerBackTitle: 'חזור'
-                }}
+                  headerBackTitle: 'חזור',
+                  headerRight: () => (
+                    <TouchableOpacity
+                      onPress={() => navigation.navigate('EditQuote', { quoteId: route.params.quoteId })}
+                      style={{ marginRight: 15 }}
+                    >
+                      <Text style={{ color: '#62929e', fontSize: 16, fontWeight: '500' }}>
+                        ערוך
+                      </Text>
+                    </TouchableOpacity>
+                  )
+                })}
               >
                 {(props) => <ViewQuoteScreen {...props} session={session} />}
               </Stack.Screen>
@@ -6567,7 +6772,7 @@ const styles = StyleSheet.create({
   quotesHeader: {
     backgroundColor: '#62929e',
     padding: 20,
-    flexDirection: 'row',
+    flexDirection: 'row-reverse',
     justifyContent: 'space-between',
     alignItems: 'center',
     shadowColor: '#000',
@@ -6590,7 +6795,7 @@ const styles = StyleSheet.create({
   customersHeader: {
     backgroundColor: '#62929e',
     padding: 20,
-    flexDirection: 'row',
+    flexDirection: 'row-reverse',
     justifyContent: 'space-between',
     alignItems: 'center',
     shadowColor: '#000',
@@ -6613,7 +6818,7 @@ const styles = StyleSheet.create({
   catalogHeader: {
     backgroundColor: '#62929e',
     padding: 20,
-    flexDirection: 'row',
+    flexDirection: 'row-reverse',
     justifyContent: 'space-between',
     alignItems: 'center',
     shadowColor: '#000',
@@ -6636,7 +6841,7 @@ const styles = StyleSheet.create({
   settingsHeader: {
     backgroundColor: '#62929e',
     padding: 20,
-    flexDirection: 'row',
+    flexDirection: 'row-reverse',
     justifyContent: 'space-between',
     alignItems: 'center',
     shadowColor: '#000',
@@ -6656,10 +6861,34 @@ const styles = StyleSheet.create({
     borderBottomWidth: 3,
     borderBottomColor: '#4a7c7e',
   },
+  tabsContainer: {
+    flexDirection: 'row-reverse',
+    backgroundColor: '#fff',
+    borderBottomWidth: 1,
+    borderBottomColor: '#e5e7eb',
+  },
+  tab: {
+    flex: 1,
+    paddingVertical: 15,
+    alignItems: 'center',
+    borderBottomWidth: 3,
+    borderBottomColor: 'transparent',
+  },
+  tabActive: {
+    borderBottomColor: '#3b82f6',
+  },
+  tabText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#6b7280',
+  },
+  tabTextActive: {
+    color: '#3b82f6',
+  },
   dashboardHeader: {
     backgroundColor: '#62929e',
     padding: 20,
-    flexDirection: 'row',
+    flexDirection: 'row-reverse',
     justifyContent: 'space-between',
     alignItems: 'center',
     shadowColor: '#000',
@@ -7595,6 +7824,14 @@ const styles = StyleSheet.create({
     textAlign: 'right',
     writingDirection: 'rtl',
   },
+  quoteItemNotes: {
+    fontSize: 13,
+    color: '#888',
+    marginTop: 4,
+    fontStyle: 'italic',
+    textAlign: 'right',
+    writingDirection: 'rtl',
+  },
   quoteItemPrices: {
     alignItems: 'flex-end',
     minWidth: 100,
@@ -7667,6 +7904,13 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#666',
     marginTop: 5,
+  },
+  quoteNotesText: {
+    fontSize: 15,
+    color: '#333',
+    lineHeight: 22,
+    textAlign: 'right',
+    writingDirection: 'rtl',
   },
   quoteActions: {
     flexDirection: 'row',
@@ -8678,7 +8922,7 @@ const styles = StyleSheet.create({
   // Customer Management Styles
   customerCard: {
     backgroundColor: '#fff',
-    padding: 15,
+    padding: 12,
     marginHorizontal: 15,
     marginVertical: 8,
     borderRadius: 10,
@@ -8691,7 +8935,7 @@ const styles = StyleSheet.create({
   customerHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginBottom: 10,
+    marginBottom: 8,
   },
   customerInfo: {
     flex: 1,
@@ -8738,10 +8982,11 @@ const styles = StyleSheet.create({
     justifyContent: 'space-around',
     borderTopWidth: 1,
     borderTopColor: '#eee',
-    paddingTop: 10,
+    paddingTop: 6,
+    marginTop: 6,
   },
   actionButton: {
-    padding: 10,
+    padding: 6,
   },
   actionIcon: {
     fontSize: 24,
