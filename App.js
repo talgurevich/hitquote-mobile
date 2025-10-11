@@ -7,6 +7,7 @@ import * as WebBrowser from 'expo-web-browser';
 import { WebView } from 'react-native-webview';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { supabase } from './lib/supabaseClient';
+import { SUPABASE_URL } from './config/supabase';
 import { validateSessionAndGetBusinessUserId } from './lib/businessUserUtils';
 import { signInWithGoogle, signOutGoogle } from './lib/googleAuth';
 import { StatusBar } from 'expo-status-bar';
@@ -16,10 +17,13 @@ import DateTimePicker from '@react-native-community/datetimepicker';
 import * as Print from 'expo-print';
 import { shareAsync } from 'expo-sharing';
 import * as ImagePicker from 'expo-image-picker';
+import * as FileSystem from 'expo-file-system';
 import ColorPalette from 'react-native-color-palette';
 import { isEmailApproved, isAdminEmail } from './lib/emailApproval';
 import { isDemoUser, getDemoData } from './lib/demoData';
 import { generatePDFTemplate, TEMPLATES } from './lib/pdfTemplates';
+import { initializeReviewTracking, trackQuoteCreated, trackSignatureReceived, checkSevenDayMilestone } from './lib/reviewManager';
+import AnimatedSplashScreen from './components/AnimatedSplashScreen';
 import NewLoginScreen from './screens/NewLoginScreen';
 
 const Stack = createStackNavigator();
@@ -700,6 +704,14 @@ function DashboardScreen({ session, navigation: navProp }) {
     }
   }, [session]);
 
+  useFocusEffect(
+    React.useCallback(() => {
+      if (session?.user?.id) {
+        loadDashboardData();
+      }
+    }, [session])
+  );
+
   const loadDashboardData = async () => {
     try {
       setDashboardData(prev => ({ ...prev, loading: true }));
@@ -763,7 +775,7 @@ function DashboardScreen({ session, navigation: navProp }) {
       });
 
       // Fetch dashboard metrics in parallel
-      const [quotesData, customersData, monthlyQuotesData, quotaData] = await Promise.all([
+      const [quotesData, customersData, monthlyQuotesData, quotaData, settingsData] = await Promise.all([
         // Total quotes
         supabase
           .from('proposal')
@@ -788,7 +800,14 @@ function DashboardScreen({ session, navigation: navProp }) {
         // Quota information
         supabase.rpc('check_user_quota', {
           p_auth_user_id: session.user.id
-        })
+        }),
+
+        // Get total quotes created (monotonic counter)
+        supabase
+          .from('settings')
+          .select('total_quotes_created')
+          .eq('business_id', businessUserId)
+          .single()
       ]);
 
       console.log('Quotes data:', {
@@ -805,9 +824,18 @@ function DashboardScreen({ session, navigation: navProp }) {
         count: monthlyQuotesData.data?.length,
         sample: monthlyQuotesData.data?.slice(0, 2)
       });
+      console.log('Quota data:', {
+        error: quotaData.error,
+        data: quotaData.data
+      });
 
       // Calculate metrics
-      const totalQuotes = quotesData.data?.length || 0;
+      console.log('📊 Settings data for total quotes:', {
+        settingsData: settingsData.data,
+        total_quotes_created: settingsData.data?.total_quotes_created,
+        businessUserId
+      });
+      const totalQuotes = settingsData.data?.total_quotes_created || 0;
       const totalCustomers = customersData.data?.length || 0;
       const monthlyQuotes = monthlyQuotesData.data || [];
       const monthlyRevenue = monthlyQuotes.reduce((sum, quote) => sum + (quote.total || 0), 0);
@@ -1449,7 +1477,7 @@ function QuotesScreen({ session, navigation: navProp }) {
 }
 
 // Settings Screen
-function SettingsScreen({ session }) {
+function SettingsScreen({ session, onLogout }) {
   // ORIGINAL STATE (for rollback):
   // Just scroll view with both sections visible
   const [activeTab, setActiveTab] = useState('business'); // 'business' or 'profile'
@@ -1461,7 +1489,10 @@ function SettingsScreen({ session }) {
   const [userProfile, setUserProfile] = useState(null);
   const [accountTier, setAccountTier] = useState(null);
   const [quotaInfo, setQuotaInfo] = useState(null);
+  const [totalQuotesCreated, setTotalQuotesCreated] = useState(0);
   const [previewTemplate, setPreviewTemplate] = useState(null);
+  const [upgradeRequest, setUpgradeRequest] = useState(null);
+  const [requestingUpgrade, setRequestingUpgrade] = useState(false);
 
   useEffect(() => {
     if (session?.user?.id) {
@@ -1470,29 +1501,40 @@ function SettingsScreen({ session }) {
       loadUserProfile();
       loadAccountTier();
       loadQuotaInfo();
+      loadUpgradeRequestStatus();
     }
   }, [session]);
 
   const loadBusinessUser = async () => {
     try {
+      console.log('🔍 loadBusinessUser: Starting...');
       const businessUserId = await validateSessionAndGetBusinessUserId(session);
+      console.log('🔍 loadBusinessUser: businessUserId =', businessUserId);
 
       const { data: userData, error } = await supabase
         .from('settings')
-        .select('business_name as name, business_email as email')
+        .select('business_name, business_email')
         .eq('business_id', businessUserId)
-        .maybeSingle();
+        .limit(1)
+        .single();
+
+      console.log('🔍 loadBusinessUser: userData =', userData, 'error =', error);
 
       if (!error && userData) {
-        setBusinessUser(userData);
+        setBusinessUser({
+          name: userData.business_name,
+          email: userData.business_email
+        });
       }
+      console.log('🔍 loadBusinessUser: Complete');
     } catch (error) {
-      console.error('Error loading business user:', error);
+      console.error('❌ Error loading business user:', error);
     }
   };
 
   const loadBusinessSettings = async () => {
     try {
+      console.log('🔍 loadBusinessSettings: Starting...');
       // Check if demo user and return demo data
       if (isDemoUser(session)) {
         console.log('🍎 Loading demo business settings for Apple Review');
@@ -1504,32 +1546,42 @@ function SettingsScreen({ session }) {
         return;
       }
 
+      console.log('🔍 loadBusinessSettings: Calling validateSessionAndGetBusinessUserId...');
       const businessUserId = await validateSessionAndGetBusinessUserId(session);
-      if (!businessUserId) return;
+      console.log('🔍 loadBusinessSettings: businessUserId =', businessUserId);
+      if (!businessUserId) {
+        console.log('⚠️ loadBusinessSettings: No businessUserId, returning early');
+        return;
+      }
 
+      console.log('🔍 loadBusinessSettings: Querying settings table...');
       // Load from settings table (same as web app)
       const { data: businessData, error } = await supabase
         .from('settings')
-        .select('business_name, business_email, business_phone, business_address, business_license, logo_url, header_color, pdf_template')
+        .select('business_name, business_email, business_phone, business_address, business_license, logo_url, header_color, pdf_template, total_quotes_created')
         .eq('business_id', businessUserId)
-        .maybeSingle();
+        .limit(1)
+        .single();
 
       console.log('📊 Business settings loaded from settings table:', {
         error,
         hasData: !!businessData,
         logo_url: businessData?.logo_url,
         businessName: businessData?.business_name,
+        totalQuotesCreated: businessData?.total_quotes_created,
         businessUserId
       });
 
       if (!error && businessData) {
         setBusinessSettings(businessData);
         setEditedSettings(businessData);
+        setTotalQuotesCreated(businessData.total_quotes_created || 0);
       } else if (error) {
         console.error('Error loading settings:', error);
       }
+      console.log('🔍 loadBusinessSettings: Complete');
     } catch (error) {
-      console.error('Error loading business settings:', error);
+      console.error('❌ Error loading business settings:', error);
     }
   };
 
@@ -1670,6 +1722,67 @@ function SettingsScreen({ session }) {
       }
     } catch (error) {
       console.error('Error loading quota info:', error);
+    }
+  };
+
+  const loadUpgradeRequestStatus = async () => {
+    try {
+      if (!session?.user?.id) return;
+
+      const response = await fetch(
+        `${SUPABASE_URL}/functions/v1/upgrade-request?authUserId=${session.user.id}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${session.access_token}`,
+          },
+        }
+      );
+
+      if (response.ok) {
+        const data = await response.json();
+        setUpgradeRequest(data.request);
+      }
+    } catch (err) {
+      console.error('Error loading upgrade request status:', err);
+      // Don't show error to user, just fail silently
+    }
+  };
+
+  const handleRequestUpgrade = async (tier) => {
+    setRequestingUpgrade(true);
+
+    try {
+      const response = await fetch(
+        `${SUPABASE_URL}/functions/v1/upgrade-request`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${session.access_token}`,
+          },
+          body: JSON.stringify({
+            authUserId: session.user.id,
+            email: session.user.email,
+            displayName: session.user.user_metadata?.full_name || session.user.email,
+            requestedPlan: tier,
+          }),
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to submit upgrade request');
+      }
+
+      const tierName = tier === 'premium' ? 'Premium' : 'Business';
+      Alert.alert('הצלחה', `בקשת השדרוג ל-${tierName} נשלחה בהצלחה! נחזור אליך בהקדם.`);
+      await loadUpgradeRequestStatus();
+    } catch (err) {
+      console.error('Error requesting upgrade:', err);
+      Alert.alert('שגיאה', 'שגיאה בשליחת בקשת השדרוג: ' + err.message);
+    } finally {
+      setRequestingUpgrade(false);
     }
   };
 
@@ -1824,22 +1937,8 @@ function SettingsScreen({ session }) {
   };
 
   const handleLogout = async () => {
-    try {
-      const { setGuestMode } = require('./lib/localStorage');
-      const { signOut } = require('./lib/auth');
-
-      console.log('🚪 Logging out...');
-
-      // Clear guest mode
-      await setGuestMode(false);
-
-      // Sign out from auth
-      await signOut();
-
-      console.log('✅ Logout complete');
-    } catch (error) {
-      console.error('❌ Logout error:', error);
-      Alert.alert('שגיאה', 'שגיאה בהתנתקות');
+    if (onLogout) {
+      await onLogout();
     }
   };
 
@@ -1974,7 +2073,7 @@ function SettingsScreen({ session }) {
                     value={editedSettings.business_phone || ''}
                     onChangeText={(text) => setEditedSettings({...editedSettings, business_phone: text})}
                     placeholder="הכנס טלפון"
-                    keyboardType="phone-pad"
+                    keyboardType="default"
                   />
                 ) : (
                   <Text style={styles.businessDetailValue}>{businessSettings.business_phone || 'לא צוין'}</Text>
@@ -2126,6 +2225,11 @@ function SettingsScreen({ session }) {
                 </View>
               )}
 
+              <View style={styles.profileRow}>
+                <Text style={styles.profileLabel}>סה״כ הצעות מחיר שנוצרו:</Text>
+                <Text style={styles.profileValue}>{totalQuotesCreated}</Text>
+              </View>
+
               {quotaInfo && quotaInfo.monthly_limit > 0 && (
                 <View style={styles.profileRow}>
                   <Text style={styles.profileLabel}>הצעות מחיר החודש:</Text>
@@ -2136,6 +2240,222 @@ function SettingsScreen({ session }) {
                       ({quotaInfo.remaining_quotes} נותרו)
                     </Text>
                   </Text>
+                </View>
+              )}
+
+              {/* Tier Selection / Upgrade Request Section */}
+              {accountTier && !isDemoUser(session) && (
+                <View style={styles.tierSelectionSection}>
+                  <Text style={styles.tierSelectionTitle}>🚀 שדרוג חשבון</Text>
+                  <Text style={styles.tierSelectionSubtitle}>
+                    בחר את החבילה המתאימה לעסק שלך
+                  </Text>
+
+                  {/* Rejected Request Alert */}
+                  {upgradeRequest?.status === 'rejected' && upgradeRequest.admin_notes && (
+                    <View style={styles.rejectedAlert}>
+                      <Text style={styles.rejectedAlertTitle}>הבקשה הקודמת נדחתה</Text>
+                      <Text style={styles.rejectedAlertText}>{upgradeRequest.admin_notes}</Text>
+                    </View>
+                  )}
+
+                  {/* Pending Request Alert */}
+                  {upgradeRequest?.status === 'pending' && (
+                    <View style={styles.pendingAlert}>
+                      <Text style={styles.pendingAlertTitle}>
+                        ⏳ בקשתך לשדרוג ל-{upgradeRequest.requested_plan === 'premium' ? 'Premium' : 'Business'} נבדקת על ידי האדמין
+                      </Text>
+                      <Text style={styles.pendingAlertText}>
+                        תאריך שליחה: {new Date(upgradeRequest.created_at).toLocaleDateString('he-IL')}
+                      </Text>
+                      <Text style={styles.pendingAlertSubtext}>נחזור אליך בהקדם</Text>
+                    </View>
+                  )}
+
+                  {/* Tier Cards - Horizontal Scroll */}
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={styles.tierCardsContainer}
+                    style={styles.tierCardsScroll}
+                  >
+                    {/* Free Tier Card */}
+                    <View style={[
+                      styles.tierCard,
+                      {
+                        backgroundColor: '#f9fafb',
+                        borderColor: accountTier.tier === 'free' ? '#6b7280' : '#e5e7eb',
+                        borderWidth: accountTier.tier === 'free' ? 3 : 2,
+                      }
+                    ]}>
+                      <Text style={[styles.tierName, { color: '#6b7280' }]}>Free</Text>
+                      {accountTier.tier === 'free' && (
+                        <View style={[styles.tierBadge, { backgroundColor: '#6b728020' }]}>
+                          <Text style={[styles.tierBadgeText, { color: '#6b7280' }]}>
+                            החבילה הנוכחית שלך ✓
+                          </Text>
+                        </View>
+                      )}
+                      <Text style={[styles.tierPrice, { color: '#6b7280' }]}>₪0 / חודש</Text>
+                      <View style={styles.tierDivider} />
+                      <Text style={styles.tierQuota}>10 הצעות מחיר</Text>
+                      <View style={styles.tierFeatures}>
+                        <View style={styles.tierFeatureRow}>
+                          <Text style={styles.tierFeatureCheck}>✓</Text>
+                          <Text style={styles.tierFeatureText}>10 הצעות מחיר בחודש</Text>
+                        </View>
+                        <View style={styles.tierFeatureRow}>
+                          <Text style={styles.tierFeatureCheck}>✓</Text>
+                          <Text style={styles.tierFeatureText}>יצוא PDF</Text>
+                        </View>
+                        <View style={styles.tierFeatureRow}>
+                          <Text style={styles.tierFeatureCheck}>✓</Text>
+                          <Text style={styles.tierFeatureText}>ניהול לקוחות</Text>
+                        </View>
+                        <View style={styles.tierFeatureRow}>
+                          <Text style={styles.tierFeatureCheck}>✓</Text>
+                          <Text style={styles.tierFeatureText}>קטלוג מוצרים</Text>
+                        </View>
+                      </View>
+                      <Text style={styles.tierDescription}>מתאים למתחילים וטסטים</Text>
+                      {accountTier.tier === 'free' && (
+                        <View style={styles.currentTierBadge}>
+                          <Text style={styles.currentTierText}>✓ בשימוש כעת</Text>
+                        </View>
+                      )}
+                    </View>
+
+                    {/* Premium Tier Card */}
+                    <View style={[
+                      styles.tierCard,
+                      {
+                        backgroundColor: '#f8f9ff',
+                        borderColor: '#667eea',
+                        borderWidth: accountTier.tier === 'premium' ? 3 : 2,
+                      }
+                    ]}>
+                      <Text style={[styles.tierName, { color: '#667eea' }]}>Premium</Text>
+                      <View style={[styles.tierBadge, { backgroundColor: '#667eea20' }]}>
+                        <Text style={[styles.tierBadgeText, { color: '#667eea' }]}>
+                          {accountTier.tier === 'premium' ? 'החבילה הנוכחית שלך ✓' : 'מומלץ 🔥'}
+                        </Text>
+                      </View>
+                      <Text style={[styles.tierPrice, { color: '#667eea' }]}>₪99 / חודש</Text>
+                      <View style={styles.tierDivider} />
+                      <Text style={styles.tierQuota}>100 הצעות מחיר</Text>
+                      <View style={styles.tierFeatures}>
+                        <View style={styles.tierFeatureRow}>
+                          <Text style={styles.tierFeatureCheck}>✓</Text>
+                          <Text style={styles.tierFeatureText}>100 הצעות מחיר בחודש</Text>
+                        </View>
+                        <View style={styles.tierFeatureRow}>
+                          <Text style={styles.tierFeatureCheck}>✓</Text>
+                          <Text style={styles.tierFeatureText}>כל תכונות Free</Text>
+                        </View>
+                        <View style={styles.tierFeatureRow}>
+                          <Text style={styles.tierFeatureCheck}>✓</Text>
+                          <Text style={styles.tierFeatureText}>לוגו מותאם אישית</Text>
+                        </View>
+                        <View style={styles.tierFeatureRow}>
+                          <Text style={styles.tierFeatureCheck}>✓</Text>
+                          <Text style={styles.tierFeatureText}>תבניות PDF מתקדמות</Text>
+                        </View>
+                        <View style={styles.tierFeatureRow}>
+                          <Text style={styles.tierFeatureCheck}>✓</Text>
+                          <Text style={styles.tierFeatureText}>תמיכה מועדפת</Text>
+                        </View>
+                      </View>
+                      <Text style={styles.tierDescription}>מתאים לעסקים קטנים-בינוניים</Text>
+                      {accountTier.tier !== 'premium' && upgradeRequest?.status !== 'pending' && (
+                        <TouchableOpacity
+                          onPress={() => handleRequestUpgrade('premium')}
+                          disabled={requestingUpgrade}
+                          style={[
+                            styles.tierButton,
+                            { backgroundColor: requestingUpgrade ? '#ccc' : '#667eea' }
+                          ]}
+                        >
+                          <Text style={styles.tierButtonText}>
+                            {requestingUpgrade ? 'שולח...' : 'בקש שדרוג ל-Premium'}
+                          </Text>
+                        </TouchableOpacity>
+                      )}
+                      {accountTier.tier === 'premium' && (
+                        <View style={styles.currentTierBadge}>
+                          <Text style={styles.currentTierText}>✓ בשימוש כעת</Text>
+                        </View>
+                      )}
+                    </View>
+
+                    {/* Business Tier Card */}
+                    <View style={[
+                      styles.tierCard,
+                      {
+                        backgroundColor: '#f0fdf4',
+                        borderColor: '#22c55e',
+                        borderWidth: accountTier.tier === 'business' ? 3 : 2,
+                      }
+                    ]}>
+                      <Text style={[styles.tierName, { color: '#22c55e' }]}>Business</Text>
+                      <View style={[styles.tierBadge, { backgroundColor: '#22c55e20' }]}>
+                        <Text style={[styles.tierBadgeText, { color: '#22c55e' }]}>
+                          {accountTier.tier === 'business' ? 'החבילה הנוכחית שלך ✓' : 'הכי משתלם 💎'}
+                        </Text>
+                      </View>
+                      <Text style={[styles.tierPrice, { color: '#22c55e' }]}>₪299 / חודש</Text>
+                      <View style={styles.tierDivider} />
+                      <Text style={styles.tierQuota}>הצעות ללא הגבלה ∞</Text>
+                      <View style={styles.tierFeatures}>
+                        <View style={styles.tierFeatureRow}>
+                          <Text style={styles.tierFeatureCheck}>✓</Text>
+                          <Text style={styles.tierFeatureText}>הצעות ללא הגבלה ∞</Text>
+                        </View>
+                        <View style={styles.tierFeatureRow}>
+                          <Text style={styles.tierFeatureCheck}>✓</Text>
+                          <Text style={styles.tierFeatureText}>כל תכונות Premium</Text>
+                        </View>
+                        <View style={styles.tierFeatureRow}>
+                          <Text style={styles.tierFeatureCheck}>✓</Text>
+                          <Text style={styles.tierFeatureText}>ניהול צוות (בקרוב)</Text>
+                        </View>
+                        <View style={styles.tierFeatureRow}>
+                          <Text style={styles.tierFeatureCheck}>✓</Text>
+                          <Text style={styles.tierFeatureText}>API גישה (בקרוב)</Text>
+                        </View>
+                        <View style={styles.tierFeatureRow}>
+                          <Text style={styles.tierFeatureCheck}>✓</Text>
+                          <Text style={styles.tierFeatureText}>תמיכה VIP</Text>
+                        </View>
+                      </View>
+                      <Text style={styles.tierDescription}>מתאים לעסקים גדולים</Text>
+                      {accountTier.tier !== 'business' && upgradeRequest?.status !== 'pending' && (
+                        <TouchableOpacity
+                          onPress={() => handleRequestUpgrade('business')}
+                          disabled={requestingUpgrade}
+                          style={[
+                            styles.tierButton,
+                            { backgroundColor: requestingUpgrade ? '#ccc' : '#22c55e' }
+                          ]}
+                        >
+                          <Text style={styles.tierButtonText}>
+                            {requestingUpgrade ? 'שולח...' : 'בקש שדרוג ל-Business'}
+                          </Text>
+                        </TouchableOpacity>
+                      )}
+                      {accountTier.tier === 'business' && (
+                        <View style={styles.currentTierBadge}>
+                          <Text style={styles.currentTierText}>✓ בשימוש כעת</Text>
+                        </View>
+                      )}
+                    </View>
+                  </ScrollView>
+
+                  {/* Value Proposition */}
+                  <View style={styles.valueProposition}>
+                    <Text style={styles.valueText}>
+                      💡 כל התשלומים מאובטחים | ביטול בכל עת | אין התחייבות
+                    </Text>
+                  </View>
                 </View>
               )}
 
@@ -2840,7 +3160,8 @@ function CreateQuoteScreen({ navigation, session, route }) {
       // Adding new product
       const existingIndex = selectedProducts.findIndex(p =>
         p.id === product.id &&
-        JSON.stringify(p.selectedOptions || []) === JSON.stringify(selectedOpts)
+        JSON.stringify(p.selectedOptions || []) === JSON.stringify(selectedOpts) &&
+        (p.notes || '') === (notes || '')
       );
 
       if (existingIndex >= 0) {
@@ -3050,6 +3371,8 @@ function CreateQuoteScreen({ navigation, session, route }) {
       console.log('Using safe business user ID for proposal:', safeBusinessUserId);
 
 
+      console.log('📝 About to insert proposal with business_id:', safeBusinessUserId);
+
       const { data: quoteData, error: quoteError } = await supabase
         .from('proposal')
         .insert({
@@ -3070,6 +3393,23 @@ function CreateQuoteScreen({ navigation, session, route }) {
         })
         .select()
         .single();
+
+      console.log('✅ Proposal inserted, checking counter...');
+
+      // Check if the counter was incremented
+      const { data: settingsCheck, error: settingsError } = await supabase
+        .from('settings')
+        .select('monthly_quotes_created, total_quotes_created, business_id')
+        .eq('business_id', safeBusinessUserId)
+        .limit(1)
+        .single();
+
+      console.log('📊 Settings after quote creation:', {
+        business_id: settingsCheck?.business_id,
+        monthly_quotes_created: settingsCheck?.monthly_quotes_created,
+        total_quotes_created: settingsCheck?.total_quotes_created,
+        settingsError
+      });
 
       if (quoteError) {
         console.error('=== QUOTE INSERT ERROR ===');
@@ -3268,6 +3608,9 @@ function CreateQuoteScreen({ navigation, session, route }) {
         safeTotal
       );
 
+      // Track quote creation for review prompt
+      trackQuoteCreated();
+
       Alert.alert('הצלחה', 'הצעת המחיר נוצרה בהצלחה!');
       navigation.goBack();
 
@@ -3368,7 +3711,7 @@ function CreateQuoteScreen({ navigation, session, route }) {
             placeholder="טלפון"
             value={customer.phone}
             onChangeText={(text) => setCustomer({...customer, phone: text})}
-            keyboardType="phone-pad"
+            keyboardType="default"
           />
           <TextInput
             style={styles.input}
@@ -3501,8 +3844,8 @@ function CreateQuoteScreen({ navigation, session, route }) {
 
       <View style={styles.summarySection}>
         <Text style={styles.sectionTitle}>מוצרים:</Text>
-        {selectedProducts.map(item => (
-          <View key={item.id} style={styles.summaryItem}>
+        {selectedProducts.map((item, index) => (
+          <View key={`${item.id}-${index}`} style={styles.summaryItem}>
             <Text>{item.name} x {item.quantity}</Text>
             <Text>₪{(item.base_price * item.quantity).toLocaleString()}</Text>
           </View>
@@ -3697,11 +4040,13 @@ function CreateQuoteScreen({ navigation, session, route }) {
 
       {/* Options Selection Modal */}
       {showOptionsModal && selectedProduct && (
-        <View style={styles.modalOverlay}>
-          <View style={styles.optionsModal}>
-            <Text style={styles.optionsModalTitle}>
-              בחר אפשרויות עבור: {selectedProduct.name}
-            </Text>
+        <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+          <View style={styles.modalOverlay}>
+            <TouchableWithoutFeedback onPress={() => {}}>
+              <View style={styles.optionsModal}>
+                <Text style={styles.optionsModalTitle}>
+                  בחר אפשרויות עבור: {selectedProduct.name}
+                </Text>
 
             <ScrollView style={styles.optionsScrollView}>
               {parseOptions(selectedProduct.options).map((option, index) => (
@@ -3736,6 +4081,8 @@ function CreateQuoteScreen({ navigation, session, route }) {
                 placeholder="הזן הערות (אופציונלי)"
                 multiline
                 numberOfLines={3}
+                blurOnSubmit={true}
+                returnKeyType="done"
               />
             </View>
 
@@ -3762,8 +4109,10 @@ function CreateQuoteScreen({ navigation, session, route }) {
                 </Text>
               </TouchableOpacity>
             </View>
+              </View>
+            </TouchableWithoutFeedback>
           </View>
-        </View>
+        </TouchableWithoutFeedback>
       )}
 
       {/* General Item Modal */}
@@ -3946,6 +4295,11 @@ function ViewQuoteScreen({ navigation, route, session }) {
 
       setQuote(quoteData);
       setQuoteItems(itemsData || []);
+
+      // Track if this is a signed quote (for review prompt)
+      if (quoteData?.signature_status === 'signed') {
+        trackSignatureReceived();
+      }
 
     } catch (error) {
       console.error('Error loading quote:', error);
@@ -4337,7 +4691,7 @@ function ViewQuoteScreen({ navigation, route, session }) {
           [{ text: 'אישור' }]
         );
       } else {
-        // Normal PDF generation - navigate to preview screen
+        // Normal PDF generation - navigate to PDF preview screen
         navigation.navigate('PDFPreview', {
           pdfUri: uri,
           quoteData: {
@@ -4465,7 +4819,7 @@ function ViewQuoteScreen({ navigation, route, session }) {
         <View style={styles.quoteSection}>
           <Text style={styles.quoteSectionTitle}>פריטים</Text>
           {quoteItems.map((item, index) => (
-            <View key={item.id} style={styles.quoteItemRow}>
+            <View key={`${item.id}-${index}`} style={styles.quoteItemRow}>
               <View style={styles.quoteItemPrices}>
                 <Text style={styles.quoteItemPrice}>
                   ₪{Number(item.unit_price || 0).toLocaleString()}
@@ -4581,15 +4935,24 @@ function ViewQuoteScreen({ navigation, route, session }) {
 // PDF Preview Screen
 function PDFPreviewScreen({ navigation, route }) {
   const { pdfUri, quoteData } = route.params;
-  const [loading, setLoading] = useState(false);
+  const [pdfBase64, setPdfBase64] = useState(null);
+  const [loading, setLoading] = useState(true);
 
-  const openPDFInBrowser = async () => {
+  useEffect(() => {
+    loadPDFAsBase64();
+  }, [pdfUri]);
+
+  const loadPDFAsBase64 = async () => {
     try {
       setLoading(true);
-      await WebBrowser.openBrowserAsync(pdfUri);
+      // Read PDF file as base64
+      const base64 = await FileSystem.readAsStringAsync(pdfUri, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+      setPdfBase64(base64);
     } catch (error) {
-      console.error('Error opening PDF:', error);
-      Alert.alert('שגיאה', 'שגיאה בפתיחת הקובץ');
+      console.error('Error loading PDF:', error);
+      Alert.alert('שגיאה', 'שגיאה בטעינת ה-PDF');
     } finally {
       setLoading(false);
     }
@@ -4605,7 +4968,7 @@ function PDFPreviewScreen({ navigation, route }) {
           >
             <Text style={styles.pdfPreviewBackButtonText}>← חזור</Text>
           </TouchableOpacity>
-          <Text style={styles.pdfPreviewTitle}>צפייה ב-PDF</Text>
+          <Text style={styles.pdfPreviewTitle}>תצוגת PDF</Text>
           <TouchableOpacity
             style={styles.pdfPreviewShareButton}
             onPress={async () => {
@@ -4624,27 +4987,27 @@ function PDFPreviewScreen({ navigation, route }) {
             <Text style={styles.pdfPreviewShareButtonText}>שתף 📤</Text>
           </TouchableOpacity>
         </View>
-        <View style={styles.pdfPreviewContent}>
-          <View style={styles.pdfPreviewInfo}>
-            <Text style={styles.pdfPreviewInfoTitle}>קובץ PDF מוכן לצפייה</Text>
-            <Text style={styles.pdfPreviewInfoText}>
-              הצעת מחיר מס' {quoteData?.proposal_number || quoteData?.id}
-            </Text>
-            <Text style={styles.pdfPreviewInfoSubtext}>
-              לחץ על הכפתור למטה לפתיחת הקובץ
-            </Text>
-          </View>
-          <TouchableOpacity
-            style={styles.pdfPreviewOpenButton}
-            onPress={openPDFInBrowser}
-            disabled={loading}
-          >
-            {loading ? (
-              <ActivityIndicator size="small" color="#374151" />
-            ) : (
-              <Text style={styles.pdfPreviewOpenButtonText}>פתח PDF 📄</Text>
-            )}
-          </TouchableOpacity>
+
+        {/* PDF in WebView using base64 */}
+        <View style={styles.pdfPreviewWebViewContainer}>
+          {loading && (
+            <View style={styles.pdfPreviewLoadingOverlay}>
+              <ActivityIndicator size="large" color="#FDDC33" />
+              <Text style={styles.pdfPreviewLoadingText}>טוען PDF...</Text>
+            </View>
+          )}
+          {!loading && pdfBase64 && (
+            <WebView
+              source={{
+                uri: `data:application/pdf;base64,${pdfBase64}`,
+              }}
+              style={styles.pdfPreviewWebView}
+              onError={(error) => {
+                console.error('WebView error:', error);
+                Alert.alert('שגיאה', 'שגיאה בהצגת ה-PDF');
+              }}
+            />
+          )}
         </View>
       </View>
     </SafeAreaView>
@@ -5088,8 +5451,8 @@ function EditQuoteScreen({ navigation, route, session }) {
             </View>
           </View>
 
-          {quoteItems.map(item => (
-            <View key={item.id} style={styles.editableItem}>
+          {quoteItems.map((item, index) => (
+            <View key={`${item.id}-${index}`} style={styles.editableItem}>
               <View style={styles.editableItemInfo}>
                 {item.isCustom ? (
                   <TextInput
@@ -5263,11 +5626,13 @@ function EditQuoteScreen({ navigation, route, session }) {
 
       {/* Options Modal */}
       {showOptionsModal && selectedProduct && (
-        <View style={styles.modalOverlay}>
-          <View style={styles.optionsModal}>
-            <Text style={styles.optionsModalTitle}>
-              בחר אפשרויות עבור: {selectedProduct.name}
-            </Text>
+        <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+          <View style={styles.modalOverlay}>
+            <TouchableWithoutFeedback onPress={() => {}}>
+              <View style={styles.optionsModal}>
+                <Text style={styles.optionsModalTitle}>
+                  בחר אפשרויות עבור: {selectedProduct.name}
+                </Text>
 
             <ScrollView style={styles.optionsScrollView}>
               {parseOptions(selectedProduct.options).map((option, index) => (
@@ -5302,6 +5667,8 @@ function EditQuoteScreen({ navigation, route, session }) {
                 placeholder="הזן הערות (אופציונלי)"
                 multiline
                 numberOfLines={3}
+                blurOnSubmit={true}
+                returnKeyType="done"
               />
             </View>
 
@@ -5328,8 +5695,10 @@ function EditQuoteScreen({ navigation, route, session }) {
                 </Text>
               </TouchableOpacity>
             </View>
+              </View>
+            </TouchableWithoutFeedback>
           </View>
-        </View>
+        </TouchableWithoutFeedback>
       )}
 
       <View style={styles.editQuoteActions}>
@@ -6126,7 +6495,7 @@ function CustomersScreen({ session, navigation: navProp, route }) {
                 placeholder="050-1234567"
                 value={newCustomer.phone}
                 onChangeText={(text) => setNewCustomer({...newCustomer, phone: text})}
-                keyboardType="phone-pad"
+                keyboardType="default"
               />
 
               <Text style={styles.fieldLabel}>כתובת</Text>
@@ -6190,7 +6559,7 @@ function CustomersScreen({ session, navigation: navProp, route }) {
                 placeholder="050-1234567"
                 value={editingCustomer?.phone || ''}
                 onChangeText={(text) => setEditingCustomer({...editingCustomer, phone: text})}
-                keyboardType="phone-pad"
+                keyboardType="default"
               />
 
               <Text style={styles.fieldLabel}>כתובת</Text>
@@ -6211,7 +6580,7 @@ function CustomersScreen({ session, navigation: navProp, route }) {
 }
 
 // Tab Navigator
-function MainTabs({ session }) {
+function MainTabs({ session, onLogout }) {
   return (
     <Tab.Navigator
       screenOptions={{
@@ -6264,7 +6633,7 @@ function MainTabs({ session }) {
           tabBarIcon: ({ color, size }) => <IconSettings color={color} size={size} />,
         }}
       >
-        {(props) => <SettingsScreen {...props} session={session} />}
+        {(props) => <SettingsScreen {...props} session={session} onLogout={onLogout} />}
       </Tab.Screen>
     </Tab.Navigator>
   );
@@ -6272,6 +6641,7 @@ function MainTabs({ session }) {
 
 // Main App Component
 export default function App() {
+  const [showSplash, setShowSplash] = useState(true);
   const [initializing, setInitializing] = useState(true);
   const [session, setSession] = useState(null);
   const [isApprovalChecking, setIsApprovalChecking] = useState(false);
@@ -6279,38 +6649,9 @@ export default function App() {
   const [isGuestSession, setIsGuestSession] = useState(false);
 
   const checkApprovalStatus = async (email) => {
-    console.log('🔍 === APP.JS AUTHORIZATION CHECK STARTING ===');
-    console.log('🔍 Input email:', email);
-    console.log('🔍 Email type:', typeof email);
-
-    if (!email) {
-      console.log('🔍 No email provided to checkApprovalStatus - returning false');
-      return false;
-    }
-
-    console.log('🔍 Checking approval status for email:', email);
-
-    // Always approve admin email immediately
-    console.log('🔍 Calling isAdminEmail...');
-    if (isAdminEmail(email)) {
-      console.log('🔍 ✅ ADMIN EMAIL DETECTED IN APP.JS, approving automatically:', email);
-      return true;
-    }
-
-    console.log('🔍 Not admin in App.js, calling isEmailApproved...');
-
-    // For non-admin users, check the database
-    try {
-      const approved = await isEmailApproved(email);
-      console.log('🔍 Email approval check result for', email, ':', approved);
-      console.log('🔍 === APP.JS FINAL RESULT:', approved ? '✅ APPROVED' : '❌ DENIED', '===');
-      return approved;
-    } catch (error) {
-      console.error('🔍 Error checking email approval:', error);
-      console.log('🔍 === APP.JS FINAL RESULT (ERROR):', '❌ DENIED', '===');
-      // If there's an error, deny access for safety but allow admin
-      return false;
-    }
+    console.log('🔍 Auto-approving user:', email);
+    // Auto-approve all users - no manual approval required
+    return true;
   };
 
   const handleManualLogin = async (mockSession) => {
@@ -6331,10 +6672,14 @@ export default function App() {
   const handleLogout = async () => {
     try {
       const { setGuestMode } = require('./lib/localStorage');
+      const { signOut } = require('./lib/auth');
       console.log('🚪 Main App handleLogout called');
 
       // Clear guest mode
       await setGuestMode(false);
+
+      // Sign out from Supabase (this will trigger the auth state listener)
+      await signOut();
 
       // Clear session state
       setSession(null);
@@ -6388,6 +6733,14 @@ export default function App() {
     };
 
     initAuth();
+
+    // Initialize review tracking and check milestones
+    initializeReviewTracking();
+
+    // Check 7-day milestone after a short delay (to not block app startup)
+    setTimeout(() => {
+      checkSevenDayMilestone();
+    }, 3000);
 
     // Check guest mode periodically using a ref to track if we should create session
     let hasCreatedGuestSession = false;
@@ -6458,6 +6811,11 @@ export default function App() {
     );
   }
 
+  // Show splash screen for 3 seconds
+  if (showSplash) {
+    return <AnimatedSplashScreen onFinish={() => setShowSplash(false)} />;
+  }
+
   return (
     <SafeAreaProvider>
       <NavigationContainer>
@@ -6470,7 +6828,7 @@ export default function App() {
             ) : (
             <>
               <Stack.Screen name="Main">
-                {() => <MainTabs session={session} />}
+                {() => <MainTabs session={session} onLogout={handleLogout} />}
               </Stack.Screen>
               <Stack.Screen
                 name="CreateQuote"
@@ -9504,51 +9862,200 @@ const styles = StyleSheet.create({
     color: '#374151',
     fontWeight: '600',
   },
-  pdfPreviewContent: {
+  pdfPreviewWebViewContainer: {
     flex: 1,
+    backgroundColor: '#fff',
+  },
+  pdfPreviewWebView: {
+    flex: 1,
+    backgroundColor: '#fff',
+  },
+  pdfPreviewLoadingOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
     justifyContent: 'center',
     alignItems: 'center',
-    paddingHorizontal: 24,
     backgroundColor: '#f5f5f5',
+    zIndex: 10,
   },
-  pdfPreviewInfo: {
-    alignItems: 'center',
-    marginBottom: 40,
-  },
-  pdfPreviewInfoTitle: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: '#374151',
-    textAlign: 'center',
-    marginBottom: 12,
-  },
-  pdfPreviewInfoText: {
-    fontSize: 18,
-    color: '#6b7280',
-    textAlign: 'center',
-    marginBottom: 8,
-  },
-  pdfPreviewInfoSubtext: {
+  pdfPreviewLoadingText: {
+    marginTop: 16,
     fontSize: 16,
-    color: '#9ca3af',
+    color: '#6b7280',
+    fontWeight: '600',
+  },
+  // Tier Selection Styles
+  tierSelectionSection: {
+    marginBottom: 24,
+  },
+  tierSelectionTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#333',
+    marginBottom: 6,
     textAlign: 'center',
   },
-  pdfPreviewOpenButton: {
-    backgroundColor: '#FDDC33',
-    paddingVertical: 16,
-    paddingHorizontal: 32,
+  tierSelectionSubtitle: {
+    fontSize: 14,
+    color: '#666',
+    marginBottom: 20,
+    textAlign: 'center',
+  },
+  rejectedAlert: {
+    backgroundColor: '#fee',
+    padding: 12,
     borderRadius: 12,
-    minWidth: 200,
-    alignItems: 'center',
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#fcc',
+  },
+  rejectedAlertTitle: {
+    fontSize: 14,
+    color: '#c33',
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  rejectedAlertText: {
+    fontSize: 12,
+    color: '#666',
+  },
+  pendingAlert: {
+    backgroundColor: '#fff3cd',
+    padding: 12,
+    borderRadius: 12,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#ffd966',
+  },
+  pendingAlertTitle: {
+    fontSize: 14,
+    color: '#856404',
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  pendingAlertText: {
+    fontSize: 12,
+    color: '#666',
+    marginBottom: 2,
+  },
+  pendingAlertSubtext: {
+    fontSize: 12,
+    color: '#666',
+    textAlign: 'center',
+    marginTop: 4,
+  },
+  tierCardsContainer: {
+    paddingHorizontal: 4,
+  },
+  tierCardsScroll: {
+    marginBottom: 16,
+  },
+  tierCard: {
+    width: 280,
+    marginRight: 16,
+    padding: 20,
+    borderRadius: 16,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1,
-    shadowRadius: 4,
+    shadowRadius: 8,
     elevation: 3,
   },
-  pdfPreviewOpenButtonText: {
-    fontSize: 18,
+  tierName: {
+    fontSize: 24,
+    fontWeight: '700',
+    marginBottom: 8,
+  },
+  tierBadge: {
+    alignSelf: 'flex-start',
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    borderRadius: 12,
+    marginBottom: 12,
+  },
+  tierBadgeText: {
+    fontSize: 12,
     fontWeight: '600',
-    color: '#374151',
+  },
+  tierPrice: {
+    fontSize: 32,
+    fontWeight: '700',
+    marginBottom: 8,
+  },
+  tierDivider: {
+    height: 2,
+    backgroundColor: '#e5e7eb',
+    marginVertical: 8,
+  },
+  tierQuota: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#333',
+    marginBottom: 16,
+  },
+  tierFeatures: {
+    marginBottom: 16,
+  },
+  tierFeatureRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginBottom: 8,
+  },
+  tierFeatureCheck: {
+    fontSize: 14,
+    color: '#22c55e',
+    marginRight: 8,
+    marginTop: 2,
+  },
+  tierFeatureText: {
+    flex: 1,
+    fontSize: 14,
+    color: '#555',
+    lineHeight: 20,
+  },
+  tierDescription: {
+    fontSize: 13,
+    color: '#888',
+    fontStyle: 'italic',
+    marginBottom: 16,
+    textAlign: 'center',
+  },
+  tierButton: {
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+    borderRadius: 10,
+    alignItems: 'center',
+  },
+  tierButtonText: {
+    color: 'white',
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  currentTierBadge: {
+    marginTop: 12,
+    paddingVertical: 8,
+    backgroundColor: '#22c55e20',
+    borderRadius: 8,
+    alignItems: 'center',
+  },
+  currentTierText: {
+    color: '#22c55e',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  valueProposition: {
+    backgroundColor: '#f9fafb',
+    padding: 12,
+    borderRadius: 12,
+    marginTop: 8,
+  },
+  valueText: {
+    fontSize: 12,
+    color: '#666',
+    textAlign: 'center',
+    lineHeight: 18,
   },
 });
