@@ -25,6 +25,7 @@ import { generatePDFTemplate, TEMPLATES } from './lib/pdfTemplates';
 import { initializeReviewTracking, trackQuoteCreated, trackSignatureReceived, checkSevenDayMilestone } from './lib/reviewManager';
 import AnimatedSplashScreen from './components/AnimatedSplashScreen';
 import NewLoginScreen from './screens/NewLoginScreen';
+import RevenueCatService from './lib/revenueCatService';
 
 const Stack = createStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -1305,6 +1306,38 @@ function QuotesScreen({ session, navigation: navProp }) {
     navigation.navigate('EditQuote', { quoteId });
   };
 
+  const toggleQuoteStatus = async (quoteId, currentStatus) => {
+    try {
+      const newStatus = currentStatus === 'signed' ? 'pending' : 'signed';
+      const updates = {
+        signature_status: newStatus
+      };
+
+      // If marking as signed, add timestamp and signer name
+      if (newStatus === 'signed') {
+        updates.signature_timestamp = new Date().toISOString();
+        updates.signer_name = 'אישור ידני';
+      } else {
+        // If marking as pending, clear signature info
+        updates.signature_timestamp = null;
+        updates.signer_name = null;
+      }
+
+      const { error } = await supabase
+        .from('proposal')
+        .update(updates)
+        .eq('id', quoteId);
+
+      if (error) throw error;
+
+      Alert.alert('הצלחה', `הצעת המחיר עודכנה ל-${newStatus === 'signed' ? 'נחתם' : 'ממתין'}`);
+      loadQuotes();
+    } catch (error) {
+      console.error('Error toggling quote status:', error);
+      Alert.alert('שגיאה', 'שגיאה בעדכון סטטוס הצעת המחיר');
+    }
+  };
+
   if (loading) {
     return (
       <View style={styles.centered}>
@@ -1336,12 +1369,31 @@ function QuotesScreen({ session, navigation: navProp }) {
     );
   }
 
-  const renderRightActions = (progress, dragX, quoteId) => {
+  const renderRightActions = (progress, dragX, quote) => {
+    const isSigned = quote.signature_status === 'signed';
+
     return (
       <View style={styles.swipeActionsContainer}>
         <TouchableOpacity
+          style={[styles.swipeAction, isSigned ? styles.swipeActionPending : styles.swipeActionSigned]}
+          onPress={() => toggleQuoteStatus(quote.id, quote.signature_status)}
+        >
+          {isSigned ? (
+            <>
+              <Text style={styles.swipeActionIcon}>⏱</Text>
+              <Text style={styles.swipeActionText}>ממתין</Text>
+            </>
+          ) : (
+            <>
+              <Text style={styles.swipeActionIcon}>✓</Text>
+              <Text style={styles.swipeActionText}>נחתם</Text>
+            </>
+          )}
+        </TouchableOpacity>
+
+        <TouchableOpacity
           style={[styles.swipeAction, styles.swipeActionEdit]}
-          onPress={() => editQuote(quoteId)}
+          onPress={() => editQuote(quote.id)}
         >
           <IconEdit color="#fff" size={24} />
           <Text style={styles.swipeActionText}>עריכה</Text>
@@ -1349,7 +1401,7 @@ function QuotesScreen({ session, navigation: navProp }) {
 
         <TouchableOpacity
           style={[styles.swipeAction, styles.swipeActionDuplicate]}
-          onPress={() => duplicateQuote(quoteId)}
+          onPress={() => duplicateQuote(quote.id)}
         >
           <IconDuplicate color="#fff" size={24} />
           <Text style={styles.swipeActionText}>שכפול</Text>
@@ -1357,7 +1409,7 @@ function QuotesScreen({ session, navigation: navProp }) {
 
         <TouchableOpacity
           style={[styles.swipeAction, styles.swipeActionDelete]}
-          onPress={() => deleteQuote(quoteId)}
+          onPress={() => deleteQuote(quote.id)}
         >
           <IconDelete color="#fff" size={24} />
           <Text style={styles.swipeActionText}>מחיקה</Text>
@@ -1368,7 +1420,7 @@ function QuotesScreen({ session, navigation: navProp }) {
 
   const renderQuoteCard = ({ item: quote }) => (
     <Swipeable
-      renderRightActions={(progress, dragX) => renderRightActions(progress, dragX, quote.id)}
+      renderRightActions={(progress, dragX) => renderRightActions(progress, dragX, quote)}
       overshootRight={false}
       rightThreshold={40}
     >
@@ -1397,14 +1449,14 @@ function QuotesScreen({ session, navigation: navProp }) {
                 אספקה: {new Date(quote.delivery_date).toLocaleDateString('he-IL')}
               </Text>
             )}
+            <Text style={[
+              styles.quoteStatus,
+              quote.signature_status === 'signed' ? styles.quoteStatusSigned : styles.quoteStatusPending
+            ]}>
+              סטטוס: {quote.signature_status === 'signed' ? 'נחתם ✓' : 'ממתין'}
+            </Text>
           </View>
         </View>
-
-        {quote.signature_status === 'signed' && (
-          <View style={styles.signedBadge}>
-            <Text style={styles.signedText}>✓ נחתם</Text>
-          </View>
-        )}
       </TouchableOpacity>
     </Swipeable>
   );
@@ -1493,6 +1545,8 @@ function SettingsScreen({ session, onLogout }) {
   const [previewTemplate, setPreviewTemplate] = useState(null);
   const [upgradeRequest, setUpgradeRequest] = useState(null);
   const [requestingUpgrade, setRequestingUpgrade] = useState(false);
+  const [offerings, setOfferings] = useState(null);
+  const [purchasing, setPurchasing] = useState(false);
 
   useEffect(() => {
     if (session?.user?.id) {
@@ -1502,8 +1556,21 @@ function SettingsScreen({ session, onLogout }) {
       loadAccountTier();
       loadQuotaInfo();
       loadUpgradeRequestStatus();
+      loadOfferings();
+      // Initialize RevenueCat with user ID
+      RevenueCatService.initialize(session.user.id);
     }
   }, [session]);
+
+  const loadOfferings = async () => {
+    try {
+      const currentOffering = await RevenueCatService.getOfferings();
+      setOfferings(currentOffering);
+      console.log('RevenueCat offerings loaded:', currentOffering);
+    } catch (error) {
+      console.error('Error loading offerings:', error);
+    }
+  };
 
   const loadBusinessUser = async () => {
     try {
@@ -1745,6 +1812,65 @@ function SettingsScreen({ session, onLogout }) {
     } catch (err) {
       console.error('Error loading upgrade request status:', err);
       // Don't show error to user, just fail silently
+    }
+  };
+
+  const handlePurchase = async (packageId) => {
+    setPurchasing(true);
+
+    try {
+      if (!offerings) {
+        Alert.alert('שגיאה', 'החבילות לא נטענו. נסה שוב.');
+        return;
+      }
+
+      // Get the package from offerings
+      const pkg = offerings.availablePackages.find(p => p.identifier === packageId);
+      if (!pkg) {
+        Alert.alert('שגיאה', 'החבילה המבוקשת לא נמצאה.');
+        return;
+      }
+
+      // Purchase the package
+      const customerInfo = await RevenueCatService.purchasePackage(pkg);
+
+      // Update account tier based on purchase
+      const activeTier = RevenueCatService.getActiveSubscription(customerInfo);
+      if (activeTier) {
+        const tierName = activeTier === 'premium' ? 'Premium' : 'Business';
+        Alert.alert('הצלחה', `המנוי ${tierName} הופעל בהצלחה!`);
+        await loadAccountTier();
+        await loadQuotaInfo();
+      }
+    } catch (err) {
+      if (!err.userCancelled) {
+        console.error('Error purchasing:', err);
+        Alert.alert('שגיאה', 'שגיאה ברכישה: ' + err.message);
+      }
+    } finally {
+      setPurchasing(false);
+    }
+  };
+
+  const handleRestorePurchases = async () => {
+    setPurchasing(true);
+    try {
+      const customerInfo = await RevenueCatService.restorePurchases();
+      const activeTier = RevenueCatService.getActiveSubscription(customerInfo);
+
+      if (activeTier) {
+        const tierName = activeTier === 'premium' ? 'Premium' : 'Business';
+        Alert.alert('הצלחה', `המנוי ${tierName} שוחזר בהצלחה!`);
+        await loadAccountTier();
+        await loadQuotaInfo();
+      } else {
+        Alert.alert('מידע', 'לא נמצאו רכישות קיימות.');
+      }
+    } catch (err) {
+      console.error('Error restoring purchases:', err);
+      Alert.alert('שגיאה', 'שגיאה בשחזור רכישות: ' + err.message);
+    } finally {
+      setPurchasing(false);
     }
   };
 
@@ -2340,7 +2466,7 @@ function SettingsScreen({ session, onLogout }) {
                           {accountTier.tier === 'premium' ? 'החבילה הנוכחית שלך ✓' : 'מומלץ 🔥'}
                         </Text>
                       </View>
-                      <Text style={[styles.tierPrice, { color: '#667eea' }]}>₪99 / חודש</Text>
+                      <Text style={[styles.tierPrice, { color: '#667eea' }]}>₪59.90 / חודש</Text>
                       <View style={styles.tierDivider} />
                       <Text style={styles.tierQuota}>100 הצעות מחיר</Text>
                       <View style={styles.tierFeatures}>
@@ -2368,15 +2494,15 @@ function SettingsScreen({ session, onLogout }) {
                       <Text style={styles.tierDescription}>מתאים לעסקים קטנים-בינוניים</Text>
                       {accountTier.tier !== 'premium' && upgradeRequest?.status !== 'pending' && (
                         <TouchableOpacity
-                          onPress={() => handleRequestUpgrade('premium')}
-                          disabled={requestingUpgrade}
+                          onPress={() => handlePurchase('premium')}
+                          disabled={purchasing}
                           style={[
                             styles.tierButton,
-                            { backgroundColor: requestingUpgrade ? '#ccc' : '#667eea' }
+                            { backgroundColor: purchasing ? '#ccc' : '#667eea' }
                           ]}
                         >
                           <Text style={styles.tierButtonText}>
-                            {requestingUpgrade ? 'שולח...' : 'בקש שדרוג ל-Premium'}
+                            {purchasing ? 'מעבד...' : 'רכישת Premium - ₪59.90/חודש'}
                           </Text>
                         </TouchableOpacity>
                       )}
@@ -2402,7 +2528,7 @@ function SettingsScreen({ session, onLogout }) {
                           {accountTier.tier === 'business' ? 'החבילה הנוכחית שלך ✓' : 'הכי משתלם 💎'}
                         </Text>
                       </View>
-                      <Text style={[styles.tierPrice, { color: '#22c55e' }]}>₪299 / חודש</Text>
+                      <Text style={[styles.tierPrice, { color: '#22c55e' }]}>₪149.90 / חודש</Text>
                       <View style={styles.tierDivider} />
                       <Text style={styles.tierQuota}>הצעות ללא הגבלה ∞</Text>
                       <View style={styles.tierFeatures}>
@@ -2430,15 +2556,15 @@ function SettingsScreen({ session, onLogout }) {
                       <Text style={styles.tierDescription}>מתאים לעסקים גדולים</Text>
                       {accountTier.tier !== 'business' && upgradeRequest?.status !== 'pending' && (
                         <TouchableOpacity
-                          onPress={() => handleRequestUpgrade('business')}
-                          disabled={requestingUpgrade}
+                          onPress={() => handlePurchase('business')}
+                          disabled={purchasing}
                           style={[
                             styles.tierButton,
-                            { backgroundColor: requestingUpgrade ? '#ccc' : '#22c55e' }
+                            { backgroundColor: purchasing ? '#ccc' : '#22c55e' }
                           ]}
                         >
                           <Text style={styles.tierButtonText}>
-                            {requestingUpgrade ? 'שולח...' : 'בקש שדרוג ל-Business'}
+                            {purchasing ? 'מעבד...' : 'רכישת Business - ₪149.90/חודש'}
                           </Text>
                         </TouchableOpacity>
                       )}
@@ -6737,6 +6863,11 @@ export default function App() {
     // Initialize review tracking and check milestones
     initializeReviewTracking();
 
+    // Initialize RevenueCat when user is logged in
+    if (session?.user?.id) {
+      RevenueCatService.initialize(session.user.id);
+    }
+
     // Check 7-day milestone after a short delay (to not block app startup)
     setTimeout(() => {
       checkSevenDayMilestone();
@@ -7476,6 +7607,18 @@ const styles = StyleSheet.create({
     marginTop: 3,
     fontWeight: '500',
     textAlign: 'right',
+  },
+  quoteStatus: {
+    fontSize: 14,
+    marginTop: 8,
+    fontWeight: '600',
+    textAlign: 'right',
+  },
+  quoteStatusSigned: {
+    color: '#27ae60',
+  },
+  quoteStatusPending: {
+    color: '#e67e22',
   },
   signedBadge: {
     position: 'absolute',
@@ -8615,6 +8758,12 @@ const styles = StyleSheet.create({
     height: '100%',
     paddingVertical: 20,
   },
+  swipeActionSigned: {
+    backgroundColor: '#27ae60',
+  },
+  swipeActionPending: {
+    backgroundColor: '#e67e22',
+  },
   swipeActionEdit: {
     backgroundColor: '#62929e',
   },
@@ -8623,6 +8772,11 @@ const styles = StyleSheet.create({
   },
   swipeActionDelete: {
     backgroundColor: '#e74c3c',
+  },
+  swipeActionIcon: {
+    color: '#fff',
+    fontSize: 22,
+    fontWeight: 'bold',
   },
   swipeActionText: {
     color: '#fff',
