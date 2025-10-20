@@ -715,6 +715,7 @@ function DashboardScreen({ session, navigation: navProp }) {
 
   const loadDashboardData = async () => {
     try {
+      console.log('📊 [Dashboard] loadDashboardData starting...');
       setDashboardData(prev => ({ ...prev, loading: true }));
 
       // Check if demo user and return demo data
@@ -825,9 +826,12 @@ function DashboardScreen({ session, navigation: navProp }) {
         count: monthlyQuotesData.data?.length,
         sample: monthlyQuotesData.data?.slice(0, 2)
       });
-      console.log('Quota data:', {
+      console.log('📊 [Dashboard] Quota data loaded:', {
         error: quotaData.error,
-        data: quotaData.data
+        data: quotaData.data,
+        tier_name: quotaData.data?.[0]?.tier_name,
+        monthly_limit: quotaData.data?.[0]?.monthly_limit,
+        current_count: quotaData.data?.[0]?.current_count
       });
 
       // Calculate metrics
@@ -864,7 +868,7 @@ function DashboardScreen({ session, navigation: navProp }) {
         .slice(0, 3)
         .map(([name, total]) => ({ name, total }));
 
-      setDashboardData({
+      const newDashboardData = {
         totalQuotes,
         totalCustomers,
         monthlyRevenue,
@@ -874,7 +878,10 @@ function DashboardScreen({ session, navigation: navProp }) {
         topProducts: [], // Will implement later
         loading: false,
         quotaInfo: quotaData?.data?.[0] || null
-      });
+      };
+
+      console.log('📊 [Dashboard] Setting dashboard data with quotaInfo:', newDashboardData.quotaInfo);
+      setDashboardData(newDashboardData);
 
     } catch (error) {
       console.error('Error loading dashboard data:', error);
@@ -1529,7 +1536,7 @@ function QuotesScreen({ session, navigation: navProp }) {
 }
 
 // Settings Screen
-function SettingsScreen({ session, onLogout }) {
+function SettingsScreen({ session, onLogout, navigation }) {
   // ORIGINAL STATE (for rollback):
   // Just scroll view with both sections visible
   const [activeTab, setActiveTab] = useState('business'); // 'business' or 'profile'
@@ -1549,24 +1556,36 @@ function SettingsScreen({ session, onLogout }) {
   const [purchasing, setPurchasing] = useState(false);
 
   useEffect(() => {
-    if (session?.user?.id) {
-      loadBusinessUser();
-      loadBusinessSettings();
-      loadUserProfile();
-      loadAccountTier();
-      loadQuotaInfo();
-      loadUpgradeRequestStatus();
-      loadOfferings();
-      // Initialize RevenueCat with user ID
-      RevenueCatService.initialize(session.user.id);
-    }
+    const initializeAndLoad = async () => {
+      if (session?.user?.id) {
+        loadBusinessUser();
+        loadBusinessSettings();
+        loadUserProfile();
+        loadAccountTier();
+        loadQuotaInfo();
+        loadUpgradeRequestStatus();
+
+        // Initialize RevenueCat FIRST
+        await RevenueCatService.initialize(session.user.id);
+        // THEN load offerings
+        loadOfferings();
+      }
+    };
+
+    initializeAndLoad();
   }, [session]);
 
   const loadOfferings = async () => {
     try {
       const currentOffering = await RevenueCatService.getOfferings();
       setOfferings(currentOffering);
-      console.log('RevenueCat offerings loaded:', currentOffering);
+      console.log('🎁 [RevenueCat] Offerings loaded:', {
+        identifier: currentOffering?.identifier,
+        availablePackages: currentOffering?.availablePackages?.map(pkg => ({
+          identifier: pkg.identifier,
+          product: pkg.product?.identifier
+        }))
+      });
     } catch (error) {
       console.error('Error loading offerings:', error);
     }
@@ -1640,8 +1659,14 @@ function SettingsScreen({ session, onLogout }) {
       });
 
       if (!error && businessData) {
-        setBusinessSettings(businessData);
-        setEditedSettings(businessData);
+        // Ensure header_color has a default value
+        const dataWithDefaults = {
+          ...businessData,
+          header_color: businessData.header_color || '#FDDC33',
+          pdf_template: businessData.pdf_template || 'template1'
+        };
+        setBusinessSettings(dataWithDefaults);
+        setEditedSettings(dataWithDefaults);
         setTotalQuotesCreated(businessData.total_quotes_created || 0);
       } else if (error) {
         console.error('Error loading settings:', error);
@@ -1662,6 +1687,8 @@ function SettingsScreen({ session, onLogout }) {
         return;
       }
 
+      console.log('💾 Saving settings with header_color:', editedSettings.header_color);
+
       const { error } = await supabase
         .from('settings')
         .update({
@@ -1670,13 +1697,15 @@ function SettingsScreen({ session, onLogout }) {
           business_phone: editedSettings.business_phone,
           business_address: editedSettings.business_address,
           business_license: editedSettings.business_license,
-          header_color: editedSettings.header_color,
+          header_color: editedSettings.header_color || '#FDDC33',
           logo_url: editedSettings.logo_url,
           pdf_template: editedSettings.pdf_template,
         })
         .eq('business_id', businessUserId);
 
       if (error) throw error;
+
+      console.log('✅ Settings saved successfully');
 
       setBusinessSettings(editedSettings);
       setIsEditing(false);
@@ -1730,6 +1759,8 @@ function SettingsScreen({ session, onLogout }) {
 
   const loadAccountTier = async () => {
     try {
+      console.log('🔍 [loadAccountTier] Starting...');
+
       // Check if demo user
       if (isDemoUser(session)) {
         setAccountTier({
@@ -1740,36 +1771,84 @@ function SettingsScreen({ session, onLogout }) {
         return;
       }
 
+      // First, check RevenueCat for active subscriptions
+      console.log('🔍 [loadAccountTier] Fetching customerInfo from RevenueCat...');
+      const customerInfo = await RevenueCatService.getCustomerInfo();
+      console.log('🔍 [loadAccountTier] CustomerInfo:', JSON.stringify(customerInfo, null, 2));
+
+      const activeTier = RevenueCatService.getActiveSubscription(customerInfo);
+      console.log('🔍 [loadAccountTier] Active tier from RevenueCat:', activeTier);
+
+      // If there's an active subscription, sync it to Supabase
+      if (activeTier) {
+        console.log('✅ Active RevenueCat subscription found:', activeTier);
+
+        const tierData = {
+          auth_user_id: session.user.id,
+          tier: activeTier,
+          monthly_quote_limit: activeTier === 'premium' ? 100 : 999999,
+        };
+
+        console.log('🔍 [loadAccountTier] Upserting to Supabase:', tierData);
+
+        // Upsert to account_tiers table
+        const { data: upsertData, error: upsertError } = await supabase
+          .from('account_tiers')
+          .upsert(tierData, {
+            onConflict: 'auth_user_id'
+          })
+          .select();
+
+        if (upsertError) {
+          console.error('❌ [loadAccountTier] Error syncing tier to Supabase:', upsertError);
+          console.error('❌ [loadAccountTier] Error details:', JSON.stringify(upsertError, null, 2));
+          // Throw error so purchase handler can notify user
+          throw new Error(`Failed to sync tier to database: ${upsertError.message || JSON.stringify(upsertError)}`);
+        } else {
+          console.log('✅ [loadAccountTier] Upsert successful:', upsertData);
+        }
+      } else {
+        console.log('⚠️ [loadAccountTier] No active subscription found in RevenueCat');
+      }
+
+      // Now load from Supabase
+      console.log('🔍 [loadAccountTier] Loading from Supabase for user:', session.user.id);
       const { data, error } = await supabase
         .from('account_tiers')
         .select('*')
         .eq('auth_user_id', session.user.id)
         .maybeSingle();
 
-      console.log('Account tier query result:', { data, error });
+      console.log('🔍 [loadAccountTier] Supabase query result:', { data, error });
 
       if (!error && data) {
         // Map tier to tier_name for consistency
+        console.log('✅ [loadAccountTier] Setting account tier:', data);
         setAccountTier({
           ...data,
           tier_name: data.tier,
         });
       } else if (!data) {
         // No tier found - user might not have a tier assigned yet
-        console.log('No account tier found for user - using default');
+        console.log('⚠️ [loadAccountTier] No account tier found for user - using default');
         setAccountTier({
           tier: 'free',
           tier_name: 'free',
           monthly_quote_limit: 10,
         });
+      } else if (error) {
+        console.error('❌ [loadAccountTier] Error loading from Supabase:', error);
       }
     } catch (error) {
-      console.error('Error loading account tier:', error);
+      console.error('❌ [loadAccountTier] Caught exception:', error);
+      console.error('❌ [loadAccountTier] Error stack:', error.stack);
     }
   };
 
   const loadQuotaInfo = async () => {
     try {
+      console.log('🔍 [loadQuotaInfo] Starting...');
+
       // Check if demo user
       if (isDemoUser(session)) {
         setQuotaInfo({
@@ -1780,15 +1859,21 @@ function SettingsScreen({ session, onLogout }) {
         return;
       }
 
+      console.log('🔍 [loadQuotaInfo] Calling check_user_quota RPC for user:', session.user.id);
       const { data, error } = await supabase.rpc('check_user_quota', {
         p_auth_user_id: session.user.id,
       });
 
+      console.log('🔍 [loadQuotaInfo] RPC result:', { data, error });
+
       if (!error && data && data[0]) {
+        console.log('✅ [loadQuotaInfo] Setting quota info:', data[0]);
         setQuotaInfo(data[0]);
+      } else {
+        console.log('⚠️ [loadQuotaInfo] No quota data returned');
       }
     } catch (error) {
-      console.error('Error loading quota info:', error);
+      console.error('❌ [loadQuotaInfo] Error:', error);
     }
   };
 
@@ -1819,33 +1904,78 @@ function SettingsScreen({ session, onLogout }) {
     setPurchasing(true);
 
     try {
+      console.log('🛒 [handlePurchase] Starting purchase for package:', packageId);
+
       if (!offerings) {
         Alert.alert('שגיאה', 'החבילות לא נטענו. נסה שוב.');
         return;
       }
 
-      // Get the package from offerings
-      const pkg = offerings.availablePackages.find(p => p.identifier === packageId);
+      console.log('🛒 [handlePurchase] Available packages:', offerings.availablePackages?.map(p => ({
+        identifier: p.identifier,
+        productId: p.product?.identifier
+      })));
+
+      // Get the package from offerings - match by identifier OR product identifier
+      const pkg = offerings.availablePackages.find(p =>
+        p.identifier === packageId ||
+        p.product?.identifier === `com.hitquote.${packageId}.monthly`
+      );
+
+      console.log('🛒 [handlePurchase] Searching for packageId:', packageId);
+      console.log('🛒 [handlePurchase] Found package:', pkg ? {
+        identifier: pkg.identifier,
+        productId: pkg.product?.identifier
+      } : 'NOT FOUND');
+
       if (!pkg) {
-        Alert.alert('שגיאה', 'החבילה המבוקשת לא נמצאה.');
+        Alert.alert('שגיאה', `החבילה המבוקשת לא נמצאה: ${packageId}`);
         return;
       }
 
       // Purchase the package
+      console.log('🛒 [handlePurchase] Calling RevenueCat purchasePackage...');
       const customerInfo = await RevenueCatService.purchasePackage(pkg);
+      console.log('🛒 [handlePurchase] Purchase completed. CustomerInfo:', JSON.stringify(customerInfo, null, 2));
 
       // Update account tier based on purchase
       const activeTier = RevenueCatService.getActiveSubscription(customerInfo);
+      console.log('🛒 [handlePurchase] Active tier after purchase:', activeTier);
+
       if (activeTier) {
         const tierName = activeTier === 'premium' ? 'Premium' : 'Business';
-        Alert.alert('הצלחה', `המנוי ${tierName} הופעל בהצלחה!`);
+
+        console.log('🛒 [handlePurchase] Calling loadAccountTier...');
         await loadAccountTier();
+
+        console.log('🛒 [handlePurchase] Calling loadQuotaInfo...');
         await loadQuotaInfo();
+
+        console.log('🛒 [handlePurchase] All updates complete');
+        console.log('🛒 [handlePurchase] Final state - accountTier:', accountTier);
+        console.log('🛒 [handlePurchase] Final state - quotaInfo:', quotaInfo);
+
+        // Navigate to Home tab to trigger re-render
+        Alert.alert('הצלחה', `המנוי ${tierName} הופעל בהצלחה!`, [
+          {
+            text: 'אישור',
+            onPress: () => {
+              // Switch to Dashboard tab to show updated UI
+              navigation.navigate('Dashboard');
+            }
+          }
+        ]);
+      } else {
+        console.log('⚠️ [handlePurchase] No active tier found after purchase!');
+        Alert.alert('שים לב', 'הרכישה הושלמה אך לא זיהינו מנוי פעיל. אנא צור קשר עם התמיכה.');
       }
     } catch (err) {
       if (!err.userCancelled) {
-        console.error('Error purchasing:', err);
+        console.error('❌ [handlePurchase] Error purchasing:', err);
+        console.error('❌ [handlePurchase] Error stack:', err.stack);
         Alert.alert('שגיאה', 'שגיאה ברכישה: ' + err.message);
+      } else {
+        console.log('ℹ️ [handlePurchase] User cancelled purchase');
       }
     } finally {
       setPurchasing(false);
@@ -1860,9 +1990,15 @@ function SettingsScreen({ session, onLogout }) {
 
       if (activeTier) {
         const tierName = activeTier === 'premium' ? 'Premium' : 'Business';
-        Alert.alert('הצלחה', `המנוי ${tierName} שוחזר בהצלחה!`);
         await loadAccountTier();
         await loadQuotaInfo();
+
+        Alert.alert('הצלחה', `המנוי ${tierName} שוחזר בהצלחה!`, [
+          {
+            text: 'אישור',
+            onPress: () => navigation.navigate('Dashboard')
+          }
+        ]);
       } else {
         Alert.alert('מידע', 'לא נמצאו רכישות קיימות.');
       }
@@ -3902,7 +4038,18 @@ function CreateQuoteScreen({ navigation, session, route }) {
                   >
                     <Text>-</Text>
                   </TouchableOpacity>
-                  <Text style={styles.quantityText}>{item.quantity}</Text>
+                  <TextInput
+                    style={styles.quantityText}
+                    value={item.quantity.toString()}
+                    onChangeText={(text) => {
+                      const num = parseFloat(text) || 0;
+                      updateProductQuantity(`${item.id}-${index}`, Math.max(0, num));
+                    }}
+                    keyboardType="numeric"
+                    textAlign="center"
+                    blurOnSubmit={true}
+                    returnKeyType="done"
+                  />
                   <TouchableOpacity
                     onPress={() => updateProductQuantity(`${item.id}-${index}`, item.quantity + 1)}
                     style={styles.quantityButton}
@@ -4282,7 +4429,18 @@ function CreateQuoteScreen({ navigation, session, route }) {
                 >
                   <Text>-</Text>
                 </TouchableOpacity>
-                <Text style={styles.quantityDisplay}>{generalItemForm.quantity}</Text>
+                <TextInput
+                  style={styles.quantityDisplay}
+                  value={generalItemForm.quantity.toString()}
+                  onChangeText={(text) => {
+                    const num = parseFloat(text) || 0;
+                    setGeneralItemForm({...generalItemForm, quantity: Math.max(0, num)});
+                  }}
+                  keyboardType="numeric"
+                  textAlign="center"
+                  blurOnSubmit={true}
+                  returnKeyType="done"
+                />
                 <TouchableOpacity
                   style={styles.quantityButton}
                   onPress={() => setGeneralItemForm({...generalItemForm, quantity: generalItemForm.quantity + 1})}
@@ -4680,6 +4838,9 @@ function ViewQuoteScreen({ navigation, route, session }) {
       console.log('Business phone:', business.business_phone);
       console.log('Business address:', business.business_address);
       console.log('Business license:', business.business_license);
+      console.log('=== COLOR DEBUG ===');
+      console.log('Header color from DB:', business.header_color);
+      console.log('PDF template from DB:', business.pdf_template);
       console.log('=== LOGO DEBUG ===');
       console.log('Logo URL from database:', business.logo_url);
       console.log('Logo URL type:', typeof business.logo_url);
@@ -4690,7 +4851,7 @@ function ViewQuoteScreen({ navigation, route, session }) {
 
       // Enhanced logo validation and formatting
       let logoUrl = business.logo_url;
-      const userColor = business.header_color || '#8fa0a6'; // Fallback to default grey
+      const userColor = business.header_color || '#FDDC33'; // Fallback to default yellow
       console.log('User selected color:', userColor);
       console.log('User color type:', typeof userColor);
       console.log('User color length:', userColor.length);
@@ -5213,7 +5374,12 @@ function EditQuoteScreen({ navigation, route, session }) {
       if (itemsError) throw itemsError;
 
       setQuote(quoteData);
-      setQuoteItems(itemsData || []);
+      // Mark items without product_id as custom so they're editable
+      const processedItems = (itemsData || []).map(item => ({
+        ...item,
+        isCustom: !item.product_id
+      }));
+      setQuoteItems(processedItems);
 
       // Set quote fields
       const deliveryDateStr = quoteData.delivery_date || '';
@@ -5622,7 +5788,18 @@ function EditQuoteScreen({ navigation, route, session }) {
                 >
                   <Text>-</Text>
                 </TouchableOpacity>
-                <Text style={styles.quantityText}>{item.qty}</Text>
+                <TextInput
+                  style={styles.quantityText}
+                  value={item.qty.toString()}
+                  onChangeText={(text) => {
+                    const num = parseFloat(text) || 0;
+                    updateItemQuantity(item.id, Math.max(0, num));
+                  }}
+                  keyboardType="numeric"
+                  textAlign="center"
+                  blurOnSubmit={true}
+                  returnKeyType="done"
+                />
                 <TouchableOpacity
                   onPress={() => updateItemQuantity(item.id, item.qty + 1)}
                   style={styles.quantityButton}

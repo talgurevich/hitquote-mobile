@@ -3,7 +3,7 @@
     "name": "hitquote-mobile",
     "slug": "hitquote-mobile",
     "owner": "hitquote",
-    "version": "1.4.1",
+    "version": "1.4.5",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
