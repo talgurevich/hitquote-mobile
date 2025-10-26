@@ -7395,11 +7395,18 @@ export default function App() {
       }
 
       try {
-        // Load business settings
+        // Get the correct business ID
+        const businessUserId = await validateSessionAndGetBusinessUserId(session);
+        if (!businessUserId) {
+          console.error('❌ Could not get business user ID');
+          return;
+        }
+
+        // Load business settings with correct business_id
         const { data: settings } = await supabase
           .from('settings')
           .select('business_phone, business_name, created_at')
-          .eq('business_id', session.user.id)
+          .eq('business_id', businessUserId)
           .maybeSingle();
 
         setBusinessSettings(settings);
