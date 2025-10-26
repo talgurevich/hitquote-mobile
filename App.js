@@ -7446,6 +7446,12 @@ export default function App() {
         const skipCount = await AsyncStorage.getItem('onboarding_skip_count');
         const lastShown = await AsyncStorage.getItem('onboarding_last_shown');
 
+        console.log('📱 Device storage check:', {
+          skipCount: skipCount,
+          lastShown: lastShown,
+          hoursSinceLastShown: lastShown ? (Date.now() - parseInt(lastShown)) / (1000 * 60 * 60) : 'never'
+        });
+
         // Don't show if skipped 3+ times
         if (parseInt(skipCount || '0') >= 3) {
           console.log('⏭️  User skipped 3+ times, not showing onboarding');
