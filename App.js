@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { NavigationContainer, useNavigation, useFocusEffect } from '@react-navigation/native';
 import { createStackNavigator } from '@react-navigation/stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { View, Text, TouchableOpacity, StyleSheet, ActivityIndicator, Alert, Image, Linking, FlatList, RefreshControl, TextInput, ScrollView, ImageBackground, Dimensions, Platform, Modal, Share, Keyboard, TouchableWithoutFeedback } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, ActivityIndicator, Alert, Image, Linking, FlatList, RefreshControl, TextInput, ScrollView, ImageBackground, Dimensions, Platform, Modal, Share, Keyboard, TouchableWithoutFeedback, Clipboard } from 'react-native';
 import * as WebBrowser from 'expo-web-browser';
 import { WebView } from 'react-native-webview';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
@@ -26,6 +26,8 @@ import { initializeReviewTracking, trackQuoteCreated, trackSignatureReceived, ch
 import AnimatedSplashScreen from './components/AnimatedSplashScreen';
 import NewLoginScreen from './screens/NewLoginScreen';
 import RevenueCatService from './lib/revenueCatService';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import OnboardingModal from './components/OnboardingModal';
 
 const Stack = createStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -793,7 +795,7 @@ function DashboardScreen({ session, navigation: navProp }) {
         // Monthly quotes for revenue and recent activity
         supabase
           .from('proposal')
-          .select('id, status, total, created_at, customer!inner(name)')
+          .select('id, status, total, created_at, first_viewed_at, customer!inner(name)')
           .eq('business_id', businessUserId)
           .gte('created_at', monthStart.toISOString())
           .lte('created_at', monthEnd.toISOString())
@@ -1052,6 +1054,16 @@ function DashboardScreen({ session, navigation: navProp }) {
                   <Text style={styles.recentItemDate}>
                     {new Date(quote.created_at).toLocaleDateString('he-IL')}
                   </Text>
+                  {quote.first_viewed_at && (
+                    <Text style={styles.recentItemViewed}>
+                      👁️ נצפה {new Date(quote.first_viewed_at).toLocaleDateString('he-IL', {
+                        month: 'short',
+                        day: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit'
+                      })}
+                    </Text>
+                  )}
                 </View>
                 <View style={styles.recentItemRight}>
                   <Text style={[styles.statusBadge, { backgroundColor: getStatusColor(quote.status) }]}>
@@ -1156,6 +1168,7 @@ function QuotesScreen({ session, navigation: navProp }) {
           signature_status,
           signature_timestamp,
           signer_name,
+          first_viewed_at,
           customer:customer (name, email, phone)
         `);
 
@@ -1462,6 +1475,16 @@ function QuotesScreen({ session, navigation: navProp }) {
             ]}>
               סטטוס: {quote.signature_status === 'signed' ? 'נחתם ✓' : 'ממתין'}
             </Text>
+            {quote.first_viewed_at && (
+              <Text style={styles.quoteViewedStatus}>
+                👁️ נצפה ב-{new Date(quote.first_viewed_at).toLocaleDateString('he-IL', {
+                  month: 'short',
+                  day: 'numeric',
+                  hour: '2-digit',
+                  minute: '2-digit'
+                })}
+              </Text>
+            )}
           </View>
         </View>
       </TouchableOpacity>
@@ -1574,6 +1597,18 @@ function SettingsScreen({ session, onLogout, navigation }) {
 
     initializeAndLoad();
   }, [session]);
+
+  // Reload settings when screen comes into focus (e.g., after onboarding)
+  useFocusEffect(
+    React.useCallback(() => {
+      console.log('⚙️ SETTINGS SCREEN FOCUSED - Reloading settings...');
+      if (session?.user?.id) {
+        loadBusinessSettings();
+        loadAccountTier();
+        loadQuotaInfo();
+      }
+    }, [session])
+  );
 
   const loadOfferings = async () => {
     try {
@@ -2051,7 +2086,7 @@ function SettingsScreen({ session, onLogout, navigation }) {
   const handleDeleteAccount = async () => {
     Alert.alert(
       'מחיקת חשבון',
-      'האם אתה בטוח שברצונך למחוק את החשבון? פעולה זו אינה ניתנת לביטול.',
+      'האם אתה בטוח שברצונך למחוק את החשבון?\n\n⚠️ חשוב: אם יש לך מנוי פעיל (Premium או Business), תצטרך לבטל אותו בנפרד דרך:\nהגדרות iPhone → שמך → מנויים → HitQuote\n\nפעולה זו אינה ניתנת לביטול.',
       [
         { text: 'ביטול', style: 'cancel' },
         {
@@ -2720,6 +2755,50 @@ function SettingsScreen({ session, onLogout, navigation }) {
                   </View>
                 </View>
               )}
+
+              {/* Support Section */}
+              <View style={styles.supportSection}>
+                <Text style={styles.supportSectionTitle}>💬 תמיכה ועזרה</Text>
+                <Text style={styles.supportSectionSubtitle}>
+                  צריכים עזרה? נשמח לסייע!
+                </Text>
+
+                {/* Email Support */}
+                <TouchableOpacity
+                  style={styles.supportItem}
+                  onPress={() => Linking.openURL('mailto:info@hitquote.online')}
+                >
+                  <View style={styles.supportIconContainer}>
+                    <Text style={styles.supportIcon}>✉️</Text>
+                  </View>
+                  <View style={styles.supportDetails}>
+                    <Text style={styles.supportLabel}>אימייל</Text>
+                    <Text style={styles.supportValue}>info@hitquote.online</Text>
+                  </View>
+                </TouchableOpacity>
+
+                {/* WhatsApp Support */}
+                <TouchableOpacity
+                  style={styles.supportItem}
+                  onPress={() => Linking.openURL('https://wa.me/972534512653')}
+                >
+                  <View style={styles.supportIconContainer}>
+                    <Text style={styles.supportIcon}>💬</Text>
+                  </View>
+                  <View style={styles.supportDetails}>
+                    <Text style={styles.supportLabel}>WhatsApp</Text>
+                    <Text style={styles.supportValue}>053-451-2653</Text>
+                  </View>
+                </TouchableOpacity>
+
+                {/* Available Hours */}
+                <View style={styles.supportHoursContainer}>
+                  <Text style={styles.supportHoursTitle}>⏰ שעות זמינות</Text>
+                  <Text style={styles.supportHoursText}>ראשון - חמישי: 9:00 - 18:00</Text>
+                  <Text style={styles.supportHoursText}>שישי: 9:00 - 13:00</Text>
+                  <Text style={styles.supportHoursSubtext}>נשתדל לחזור אליך תוך 24 שעות</Text>
+                </View>
+              </View>
 
               {!isDemoUser(session) && (
                 <TouchableOpacity
@@ -4640,6 +4719,108 @@ function ViewQuoteScreen({ navigation, route, session }) {
     }
   };
 
+  const enablePublicSharing = async () => {
+    try {
+      if (!quote?.id) {
+        Alert.alert('שגיאה', 'לא ניתן לשתף הצעת מחיר זו');
+        return null;
+      }
+
+      console.log('🔗 Enabling public sharing for quote:', quote.id);
+
+      // Check if already has a share token
+      if (quote.public_share_token && quote.share_enabled) {
+        console.log('✅ Quote already has public sharing enabled');
+        return quote.public_share_token;
+      }
+
+      // Call the database function to enable sharing
+      const { data, error } = await supabase
+        .rpc('enable_quote_sharing', { p_proposal_id: quote.id });
+
+      if (error) {
+        console.error('Error enabling public sharing:', error);
+        throw error;
+      }
+
+      console.log('✅ Public sharing enabled, token:', data);
+
+      // Update local quote state
+      setQuote(prev => ({
+        ...prev,
+        public_share_token: data,
+        share_enabled: true,
+        shared_at: new Date().toISOString()
+      }));
+
+      return data;
+    } catch (error) {
+      console.error('Error in enablePublicSharing:', error);
+      Alert.alert('שגיאה', 'שגיאה ביצירת קישור שיתוף');
+      return null;
+    }
+  };
+
+  const sharePublicLink = async () => {
+    try {
+      const token = await enablePublicSharing();
+      if (!token) return;
+
+      const publicUrl = `https://hitquote.online/q/${token}`;
+      const proposalNumber = quote.proposal_number || quote.id;
+      const customerName = quote.customer?.name || 'לקוח';
+
+      // Show options for sharing the public link
+      Alert.alert(
+        'קישור ציבורי להצעת מחיר',
+        `הקישור נוצר בהצלחה!\n\n${publicUrl}`,
+        [
+          {
+            text: 'העתק קישור',
+            onPress: () => {
+              Clipboard.setString(publicUrl);
+              Alert.alert('הועתק!', 'הקישור הועתק ללוח');
+            }
+          },
+          {
+            text: 'שלח ב-WhatsApp',
+            onPress: () => {
+              const message = `🧾 הצעת מחיר מספר ${proposalNumber}
+
+👤 לקוח: ${customerName}
+
+📱 צפייה בהצעה:
+${publicUrl}
+
+נוצר באמצעות HitQuote - מערכת ניהול הצעות מחיר`;
+              shareViaWhatsApp(message);
+            }
+          },
+          {
+            text: 'שתף',
+            onPress: async () => {
+              try {
+                await Share.share({
+                  message: `הצעת מחיר מספר ${proposalNumber}\n\nצפייה: ${publicUrl}`,
+                  url: publicUrl
+                });
+              } catch (err) {
+                console.error('Error sharing:', err);
+              }
+            }
+          },
+          {
+            text: 'סגור',
+            style: 'cancel'
+          }
+        ]
+      );
+    } catch (error) {
+      console.error('Error sharing public link:', error);
+      Alert.alert('שגיאה', 'שגיאה בשיתוף הקישור');
+    }
+  };
+
   const shareQuote = async () => {
     try {
       if (!quote?.id) {
@@ -4660,6 +4841,10 @@ function ViewQuoteScreen({ navigation, route, session }) {
         'שיתוף הצעת מחיר',
         'כיצד תרצה לשתף את ההצעה?',
         [
+          {
+            text: 'קישור ציבורי 🔗',
+            onPress: () => sharePublicLink()
+          },
           {
             text: 'WhatsApp',
             onPress: () => {
@@ -5076,6 +5261,62 @@ function ViewQuoteScreen({ navigation, route, session }) {
           </Text>
         </View>
 
+        {/* View Analytics */}
+        {quote.share_enabled && quote.public_share_token && (
+          <View style={styles.analyticsSection}>
+            <View style={styles.analyticsHeader}>
+              <Text style={styles.analyticsSectionTitle}>📊 סטטיסטיקות צפייה</Text>
+              {quote.view_count > 0 && (
+                <View style={styles.analyticsBadge}>
+                  <Text style={styles.analyticsBadgeText}>
+                    👁 {quote.view_count} צפיות
+                  </Text>
+                </View>
+              )}
+            </View>
+            <View style={styles.analyticsGrid}>
+              <View style={styles.analyticsCard}>
+                <Text style={styles.analyticsLabel}>משותף מאז</Text>
+                <Text style={styles.analyticsValue}>
+                  {quote.shared_at ? new Date(quote.shared_at).toLocaleDateString('he-IL') : '-'}
+                </Text>
+              </View>
+              {quote.first_viewed_at && (
+                <View style={styles.analyticsCard}>
+                  <Text style={styles.analyticsLabel}>צפייה ראשונה</Text>
+                  <Text style={styles.analyticsValue}>
+                    {new Date(quote.first_viewed_at).toLocaleDateString('he-IL')}
+                  </Text>
+                </View>
+              )}
+              {quote.last_viewed_at && (
+                <View style={styles.analyticsCard}>
+                  <Text style={styles.analyticsLabel}>צפייה אחרונה</Text>
+                  <Text style={styles.analyticsValue}>
+                    {new Date(quote.last_viewed_at).toLocaleDateString('he-IL')}
+                  </Text>
+                </View>
+              )}
+            </View>
+            <View style={styles.publicLinkContainer}>
+              <Text style={styles.publicLinkLabel}>🔗 קישור ציבורי:</Text>
+              <TouchableOpacity
+                style={styles.publicLinkButton}
+                onPress={() => {
+                  const publicUrl = `https://hitquote.online/q/${quote.public_share_token}`;
+                  Clipboard.setString(publicUrl);
+                  Alert.alert('הועתק!', 'הקישור הועתק ללוח');
+                }}
+              >
+                <Text style={styles.publicLinkText} numberOfLines={1}>
+                  hitquote.online/q/{quote.public_share_token?.slice(0, 8)}...
+                </Text>
+                <Text style={styles.copyIcon}>📋</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
+
         {/* Customer Details */}
         <View style={styles.quoteSection}>
           <Text style={styles.quoteSectionTitle}>פרטי לקוח</Text>
@@ -5189,6 +5430,17 @@ function ViewQuoteScreen({ navigation, route, session }) {
             {quote.signature_timestamp && (
               <Text style={styles.signatureDate}>
                 תאריך חתימה: {new Date(quote.signature_timestamp).toLocaleDateString('he-IL')}
+              </Text>
+            )}
+            {quote.first_viewed_at && (
+              <Text style={styles.signatureDate}>
+                👁️ נצפה לראשונה: {new Date(quote.first_viewed_at).toLocaleDateString('he-IL', {
+                  year: 'numeric',
+                  month: 'short',
+                  day: 'numeric',
+                  hour: '2-digit',
+                  minute: '2-digit'
+                })}
               </Text>
             )}
           </View>
@@ -6662,10 +6914,17 @@ function CustomersScreen({ session, navigation: navProp, route }) {
                         navigation.navigate('ViewQuote', { quoteId: quote.id });
                       }}
                     >
-                      <Text style={styles.quoteHistoryNumber}>#{quote.proposal_number || quote.id.slice(0, 8)}</Text>
-                      <Text style={styles.quoteHistoryDate}>
-                        {new Date(quote.created_at).toLocaleDateString('he-IL')}
-                      </Text>
+                      <View style={styles.quoteHistoryRight}>
+                        <Text style={styles.quoteHistoryNumber}>#{quote.proposal_number || quote.id.slice(0, 8)}</Text>
+                        <Text style={styles.quoteHistoryDate}>
+                          {new Date(quote.created_at).toLocaleDateString('he-IL')}
+                        </Text>
+                        {quote.first_viewed_at && (
+                          <Text style={styles.quoteHistoryViewed}>
+                            👁️ נצפה
+                          </Text>
+                        )}
+                      </View>
                       <Text style={styles.quoteHistoryTotal}>₪{(quote.total || 0).toLocaleString()}</Text>
                       <Text style={[
                         styles.quoteHistoryStatus,
@@ -6950,6 +7209,8 @@ export default function App() {
   const [isApprovalChecking, setIsApprovalChecking] = useState(false);
   const [isApproved, setIsApproved] = useState(false);
   const [isGuestSession, setIsGuestSession] = useState(false);
+  const [showOnboarding, setShowOnboarding] = useState(false);
+  const [businessSettings, setBusinessSettings] = useState(null);
 
   const checkApprovalStatus = async (email) => {
     console.log('🔍 Auto-approving user:', email);
@@ -7111,6 +7372,120 @@ export default function App() {
     };
   }, []);
 
+  // Check if onboarding should be shown
+  useEffect(() => {
+    console.log('🔍 Onboarding check triggered:', {
+      hasSession: !!session?.user?.id,
+      isApproved,
+      isGuestSession,
+      initializing
+    });
+
+    const checkOnboardingStatus = async () => {
+      // Don't show for demo/guest users
+      if (!session?.user?.id || isDemoUser(session) || isGuestSession) {
+        console.log('⏭️  Skipping onboarding: demo/guest user or no session');
+        return;
+      }
+
+      // Don't show until session is approved
+      if (!isApproved) {
+        console.log('⏭️  Skipping onboarding: user not approved yet');
+        return;
+      }
+
+      try {
+        // Load business settings
+        const { data: settings } = await supabase
+          .from('settings')
+          .select('business_phone, business_name, created_at')
+          .eq('business_id', session.user.id)
+          .maybeSingle();
+
+        setBusinessSettings(settings);
+
+        console.log('📊 Settings check:', {
+          hasSettings: !!settings,
+          hasBusinessName: !!settings?.business_name,
+          hasPhone: !!settings?.business_phone,
+          createdAt: settings?.created_at
+        });
+
+        // If business name exists, consider onboarding complete
+        // (business_name is required in step 1, phone can be skipped)
+        if (settings?.business_name) {
+          console.log('✅ Business name exists, skipping onboarding');
+          return;
+        }
+
+        // If user has NO settings record at all, show onboarding immediately
+        if (!settings) {
+          console.log('🆕 No settings record found, showing onboarding immediately');
+          setTimeout(() => setShowOnboarding(true), 2000);
+          return;
+        }
+
+        // Check if user is brand new (created < 5 minutes ago)
+        const isNewUser = settings?.created_at &&
+          (new Date() - new Date(settings.created_at)) < 5 * 60 * 1000;
+
+        if (isNewUser) {
+          console.log('👋 New user detected, showing onboarding after 2 seconds');
+          setTimeout(() => setShowOnboarding(true), 2000);
+          return;
+        }
+
+        // For existing users with settings but no business name, check device storage
+        const skipCount = await AsyncStorage.getItem('onboarding_skip_count');
+        const lastShown = await AsyncStorage.getItem('onboarding_last_shown');
+
+        // Don't show if skipped 3+ times
+        if (parseInt(skipCount || '0') >= 3) {
+          console.log('⏭️  User skipped 3+ times, not showing onboarding');
+          return;
+        }
+
+        // Don't show more than once per day
+        if (lastShown) {
+          const hoursSince = (Date.now() - parseInt(lastShown)) / (1000 * 60 * 60);
+          if (hoursSince < 24) {
+            console.log('⏰ Showed within last 24 hours, skipping');
+            return;
+          }
+        }
+
+        // Show onboarding for existing users without business name
+        console.log('📝 No business name found, showing onboarding');
+        setShowOnboarding(true);
+      } catch (error) {
+        console.error('❌ Error checking onboarding status:', error);
+      }
+    };
+
+    if (session?.user?.id && isApproved && !initializing) {
+      checkOnboardingStatus();
+    }
+  }, [session, isApproved, isGuestSession, initializing]);
+
+  const handleOnboardingClose = async (completed) => {
+    setShowOnboarding(false);
+
+    if (completed) {
+      console.log('✅ Onboarding completed!');
+      // Reload business settings
+      try {
+        const { data: settings } = await supabase
+          .from('settings')
+          .select('business_phone, business_name')
+          .eq('business_id', session.user.id)
+          .single();
+        setBusinessSettings(settings);
+      } catch (error) {
+        console.error('Error reloading settings:', error);
+      }
+    }
+  };
+
   if (initializing || isApprovalChecking) {
     return (
       <View style={styles.centered}>
@@ -7211,6 +7586,14 @@ export default function App() {
         </Stack.Navigator>
       </NavigationContainer>
       <StatusBar style="auto" />
+
+      {/* Onboarding Modal */}
+      <OnboardingModal
+        visible={showOnboarding}
+        onClose={handleOnboardingClose}
+        session={session}
+        initialData={businessSettings || {}}
+      />
     </SafeAreaProvider>
   );
 }
@@ -7797,6 +8180,13 @@ const styles = StyleSheet.create({
   quoteStatusPending: {
     color: '#e67e22',
   },
+  quoteViewedStatus: {
+    fontSize: 12,
+    color: '#3498db',
+    marginTop: 4,
+    fontWeight: '500',
+    textAlign: 'right',
+  },
   signedBadge: {
     position: 'absolute',
     top: 10,
@@ -7896,6 +8286,99 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#6b7280',
     fontWeight: '400',
+  },
+  // Support Section Styles
+  supportSection: {
+    backgroundColor: '#f8f9ff',
+    borderRadius: 12,
+    padding: 20,
+    marginTop: 20,
+    borderWidth: 1,
+    borderColor: '#e0e7ff',
+  },
+  supportSectionTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: '#1e293b',
+    textAlign: 'right',
+    marginBottom: 6,
+  },
+  supportSectionSubtitle: {
+    fontSize: 14,
+    color: '#64748b',
+    textAlign: 'right',
+    marginBottom: 20,
+  },
+  supportItem: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    backgroundColor: '#fff',
+    borderRadius: 10,
+    padding: 15,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+  supportIconContainer: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: '#f1f5f9',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginLeft: 15,
+  },
+  supportIcon: {
+    fontSize: 24,
+  },
+  supportDetails: {
+    flex: 1,
+    alignItems: 'flex-end',
+  },
+  supportLabel: {
+    fontSize: 12,
+    color: '#64748b',
+    marginBottom: 4,
+    textAlign: 'right',
+  },
+  supportValue: {
+    fontSize: 16,
+    color: '#1e293b',
+    fontWeight: '600',
+    textAlign: 'right',
+  },
+  supportHoursContainer: {
+    backgroundColor: '#fff',
+    borderRadius: 10,
+    padding: 15,
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  supportHoursTitle: {
+    fontSize: 14,
+    fontWeight: 'bold',
+    color: '#1e293b',
+    textAlign: 'right',
+    marginBottom: 10,
+  },
+  supportHoursText: {
+    fontSize: 14,
+    color: '#475569',
+    textAlign: 'right',
+    marginBottom: 4,
+  },
+  supportHoursSubtext: {
+    fontSize: 12,
+    color: '#94a3b8',
+    textAlign: 'right',
+    marginTop: 8,
+    fontStyle: 'italic',
   },
   deleteAccountButton: {
     backgroundColor: '#fee2e2',
@@ -9832,17 +10315,28 @@ const styles = StyleSheet.create({
     borderBottomColor: '#eee',
     minHeight: 60,
   },
+  quoteHistoryRight: {
+    flex: 2,
+    alignItems: 'flex-end',
+  },
   quoteHistoryNumber: {
     fontSize: 14,
     fontWeight: 'bold',
     color: '#333',
-    flex: 1,
+    textAlign: 'right',
   },
   quoteHistoryDate: {
     fontSize: 12,
     color: '#666',
-    flex: 1,
-    textAlign: 'center',
+    marginTop: 2,
+    textAlign: 'right',
+  },
+  quoteHistoryViewed: {
+    fontSize: 11,
+    color: '#3498db',
+    marginTop: 2,
+    fontWeight: '500',
+    textAlign: 'right',
   },
   quoteHistoryTotal: {
     fontSize: 14,
@@ -10034,6 +10528,13 @@ const styles = StyleSheet.create({
   recentItemDate: {
     fontSize: 12,
     color: '#6b7280',
+    textAlign: 'right',
+  },
+  recentItemViewed: {
+    fontSize: 11,
+    color: '#3498db',
+    marginTop: 3,
+    fontWeight: '500',
     textAlign: 'right',
   },
   recentItemRight: {
@@ -10388,5 +10889,93 @@ const styles = StyleSheet.create({
     color: '#666',
     textAlign: 'center',
     lineHeight: 18,
+  },
+  // Analytics Section Styles
+  analyticsSection: {
+    backgroundColor: '#f8fafc',
+    padding: 16,
+    marginHorizontal: 16,
+    marginVertical: 8,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  analyticsHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  analyticsSectionTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  analyticsBadge: {
+    backgroundColor: '#3b82f6',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+  },
+  analyticsBadgeText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  analyticsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 12,
+  },
+  analyticsCard: {
+    flex: 1,
+    minWidth: '30%',
+    backgroundColor: '#fff',
+    padding: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  analyticsLabel: {
+    fontSize: 11,
+    color: '#64748b',
+    marginBottom: 4,
+  },
+  analyticsValue: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#1e293b',
+  },
+  publicLinkContainer: {
+    backgroundColor: '#fff',
+    padding: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  publicLinkLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748b',
+    marginBottom: 6,
+  },
+  publicLinkButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#f1f5f9',
+    padding: 10,
+    borderRadius: 6,
+  },
+  publicLinkText: {
+    flex: 1,
+    fontSize: 13,
+    color: '#3b82f6',
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+  },
+  copyIcon: {
+    fontSize: 18,
+    marginLeft: 8,
   },
 });
